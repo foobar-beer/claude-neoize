@@ -10,6 +10,10 @@ services:
       # Nothing leaves this host: turn off the product-analytics and usage-report phone-home.
       NEO4J_client_allow__telemetry: "false"
       NEO4J_dbms_usage__report_enabled: "false"
+      # Loopback dev graph on a throwaway password: the account lockout gives no security here and the
+      # first-boot healthcheck plus the batch loaders trip the default (3 attempts, 5s lock). Raise it
+      # high so a brief auth hiccup during a load never locks the account.
+      NEO4J_dbms_security_auth__max__failed__attempts: "1000"
     ports:
       # Bind to loopback ONLY. The default "7474:7474" publishes on 0.0.0.0 (the whole LAN); this is
       # a local dev graph on a local password, so it must never be reachable off this host.
