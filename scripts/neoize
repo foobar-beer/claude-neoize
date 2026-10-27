@@ -13,6 +13,7 @@ fully generic. This CLI owns the database lifecycle and the generic knowledge la
   neoize load-lessons ...   # load authored lessons (delegates to scripts/load-lessons)
   neoize load-graph <file>  # load a project collector's .cypher, resetting only the structural layer
   neoize check [path]       # validate lessons files locally: schema, duplicate ids, dangling supersedes
+  neoize check-graph        # run the project's structural check (.neoize/check.py), if it has one
   neoize query "<cypher>"   # run one Cypher query against the running graph
 
 Connection from the environment, with local defaults matching the shipped docker-compose:
@@ -149,6 +150,17 @@ def cmd_load_graph(args):
     return 0
 
 
+def cmd_check_graph(args):
+    """Run the project's own structural check, if it ships one. The check is project-specific logic
+    (wiring completeness, an invariant, orphans) living at .neoize/check.py; this just runs it and
+    passes its exit code through. A project with no check.py is not an error, it simply has none."""
+    check = os.path.join(_neoize_dir(), "check.py")
+    if not os.path.isfile(check):
+        print(f"No structural check at {check} (this project ships none). Nothing to run.")
+        return 0
+    return subprocess.run([sys.executable, check, *args.rest], check=False).returncode
+
+
 def _iter_lesson_files(path):
     if os.path.isdir(path):
         return sorted(glob.glob(os.path.join(path, "*.json")))
@@ -225,6 +237,10 @@ def main():
     ck = sub.add_parser("check", help="validate lessons files locally (no graph)")
     ck.add_argument("path", nargs="?", help="file/dir/glob (default .neoize/lessons)")
     ck.set_defaults(func=cmd_check)
+
+    cg = sub.add_parser("check-graph", help="run the project's structural check (.neoize/check.py)")
+    cg.add_argument("rest", nargs=argparse.REMAINDER, help="args passed through to check.py")
+    cg.set_defaults(func=cmd_check_graph)
 
     q = sub.add_parser("query", help="run one Cypher query")
     q.add_argument("cypher", help="the Cypher query")

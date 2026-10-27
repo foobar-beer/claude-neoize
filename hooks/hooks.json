@@ -22,6 +22,17 @@
             "timeout": 15
           }
         ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/graph-operation-reminder.py"],
+            "timeout": 15
+          }
+        ]
       }
     ]
   }

@@ -27,7 +27,24 @@ That is the whole list. The MCP server Claude queries the graph through is bundl
 
 If a prerequisite is missing, say exactly which one and how to get it, then stop. Do not work around it.
 
-## Step 2 - scaffold `.neoize/`
+## Step 2 - decide where `.neoize/` lives
+
+`.neoize/` holds authored data (lessons, the collector, the trigger table) that the user
+version-controls, so it must land inside a git repository. Do NOT assume the project directory is one.
+Check it: `git -C <project> rev-parse --show-toplevel`.
+
+- If the project directory is itself a git repo, `.neoize/` goes at its root. Normal case.
+- If it is NOT a repo, or it is a **multi-repo workspace** (a directory holding several independent
+  repos with no repo at the top, which is common for a product split across many repos), then a
+  `.neoize/` at the top would be untracked and its lessons would not be version-controlled. STOP and
+  ask the user which repo or sub-directory should hold the version-controlled `.neoize/` (a shared
+  tooling or dev repo is the usual answer). Create it there, then make a symlink at the workspace root,
+  `<workspace>/.neoize -> <that path>`, so the plugin, which looks for `.neoize/` under
+  `$CLAUDE_PROJECT_DIR`, still finds it.
+
+Report where `.neoize/` will live and why before creating anything.
+
+## Step 3 - scaffold `.neoize/`
 
 Create, if absent:
 
@@ -41,7 +58,7 @@ Create, if absent:
 
 Do not overwrite a file that already exists. Report what you created and what you left alone.
 
-## Step 3 - bring the graph up and prove it
+## Step 4 - bring the graph up and prove it
 
 Run `neoize up` (the CLI is at `${CLAUDE_PLUGIN_ROOT}/scripts/neoize`), then `neoize status`. The graph
 starts empty, which is correct. Load the seed lessons with `neoize load-lessons` and read the
@@ -54,7 +71,7 @@ the Topic nodes) and confirm the count matches what `neoize status` showed. If t
 present, the plugin was installed in a session that has not restarted since; tell the user to restart
 Claude Code, because a fresh MCP registration needs it.
 
-## Step 4 (DECISION POINT) - propose the structural schema
+## Step 5 (DECISION POINT) - propose the structural schema
 
 This is the project-specific half. Read the codebase enough to propose, in a short
 `.neoize/SCHEMA.md`, the handful of **domain entities** and **relationships** that are worth making
@@ -68,7 +85,7 @@ State plainly what you would extract, from which files, and which questions it w
 schema before writing any collector. A wrong schema is cheap to fix now and expensive once lessons
 anchor to it.
 
-## Step 5 - scaffold the collector (after sign-off)
+## Step 6 - scaffold the collector (after sign-off)
 
 Write `.neoize/collect.py`: a project-specific script that reads the approved sources and emits
 `.neoize/graph.json` in the node/edge shape the loader expects (see
@@ -76,15 +93,27 @@ Write `.neoize/collect.py`: a project-specific script that reads the approved so
 PROJECTION: it regenerates from the code and is never hand-edited. Commit `graph.json` (it is small and
 diffable); do not commit any large symbol dump, which is a rebuildable artifact.
 
-Load it with `neoize load-lessons` afterwards is wrong; structural nodes load through the graph.cypher.
-Load the structure, THEN re-run `neoize load-lessons` so lesson anchors to structural nodes resolve.
-Say which commands you ran and what counts came back.
+Load the structure with `neoize load-graph .neoize/graph.cypher`, which resets only the structural
+projection and preserves the lesson, topic, operation and symbol layers. THEN re-run
+`neoize load-lessons` so the lesson anchors to structural nodes resolve. Say which commands you ran and
+what counts came back.
 
-The symbol/reference layer (every function and its resolved callers) is deliberately out of scope for
-v1 unless the user asks: it needs a language-aware parser and is the one piece that does not generalize
-cheaply. If they want it, scope it as a separate follow-up with its own collector.
+`.neoize/` legitimately holds more than lessons: a project puts whatever tooling its graph needs there,
+alongside `collect.py`. Two common additions, both optional, both scaffolded only when the project wants
+them:
 
-## Step 6 - wire the "graph first" reflex
+- **A structural check.** `.neoize/check.py`: project-specific validation over `graph.json` (wiring
+  completeness, an invariant that must hold, orphans). It prints the denominator it examined and exits
+  non-zero on a finding, so it works offline and in CI. Run it with `neoize check-graph`.
+- **A symbol / reference layer.** `.neoize/symbols/`: a language-aware extractor (every declaration a
+  Symbol node, every resolved call a REFERENCES edge) plus a small loader. This is the one layer that
+  does not generalize cheaply, because it needs a parser for the project's language (javaparser, a
+  tree-sitter grammar, a language server), so it is a per-project tool and may carry its own build (a
+  jar, a venv). Offer it when the user wants symbol-level lesson anchoring or a resolved call graph;
+  skip it otherwise. `neoize load-graph` already preserves Symbol and File nodes across a structural
+  reload, so the symbol layer survives a `collect.py` rebuild.
+
+## Step 7 - wire the "graph first" reflex
 
 Offer to add a short section to the project's `CLAUDE.md` (or create one) that tells Claude to query the
 graph before grepping for a project fact, names the MCP tools, and lists the three retrieval shapes (by
