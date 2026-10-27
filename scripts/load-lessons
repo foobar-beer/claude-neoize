@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""
+load-lessons - load authored Lesson nodes, their anchors and supersedes edges into the graph.
+
+A lesson is authored knowledge (a gotcha, a convention, a rule) ANCHORED to the structural or
+symbol entity it concerns, so it is retrieved by relevance rather than read wholesale. This loader
+is the knowledge layer of claude-neoize and is deliberately project-agnostic: the structural and
+symbol graph a lesson may anchor onto is produced by a per-project collector, this script only
+loads the authored JSON on top.
+
+  ./load-lessons [--prune] <lessons.json> [more.json ...] | <dir> | <glob>
+
+A lesson object carries: id, title, body, kind, scope, confidence, status, anchors[], and the
+optional provenance{date,commit,pr,session} and supersedes[] fields.
+
+  provenance   flattened onto the node as prov_date / prov_commit / prov_pr / prov_session (Neo4j
+               has no nested node maps), so the age of a lesson is queryable (prov_date).
+  supersedes   a list of lesson ids this lesson replaces; each becomes (this)-[:SUPERSEDES]->(old).
+               A target not already in the graph or this load pass is reported and skipped.
+  status       active     -> loaded normally.
+               historical -> loaded, kept as a prop (a fixed-bug postmortem worth keeping as reasoning).
+               retired    -> a tombstone: the node is DETACH DELETEd and NOT loaded.
+
+  --prune      after loading, DETACH DELETE every graph Lesson whose id is absent from the loaded
+               files. ONLY meaningful with the full set (a directory of every lessons/*.json); run
+               with one file and it deletes the rest. Prints each pruned id.
+
+Pass one file, several files, a glob, or a directory of *.json and they load in ONE pass. Every
+anchor is VALIDATED against the graph before loading: an anchor naming a node that does not exist is
+reported and skipped, never fabricated (a lesson that silently anchors to nothing is worse than no
+lesson). Topic and Operation nodes are the authored anchor kinds and are created on demand.
+
+Loads via `docker exec ... cypher-shell` (no python driver needed). Connection from the environment,
+with dev defaults: NEOIZE_NEO4J_CONTAINER (neoize-neo4j), NEOIZE_NEO4J_USER (neo4j),
+NEOIZE_NEO4J_PASSWORD (neoize-local).
+"""
+import glob
+import json
+import os
+import subprocess
+import sys
+
+ENV = (os.environ.get("NEOIZE_NEO4J_CONTAINER", "neoize-neo4j"),
+       os.environ.get("NEOIZE_NEO4J_USER", "neo4j"),
+       os.environ.get("NEOIZE_NEO4J_PASSWORD", "neoize-local"))
+
+
+def cy(query):
+    c, u, p = ENV
+    proc = subprocess.run(["docker", "exec", "-i", c, "cypher-shell", "-u", u, "-p", p,
+                           "--format", "plain"], input=query, text=True, capture_output=True)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stdout + proc.stderr)
+        raise SystemExit(f"cypher-shell failed (exit {proc.returncode})")
+    return proc.stdout
+
+
+def existing_ids(label):
+    """The set of id values of every node with this label, from ONE query."""
+    out = cy(f"MATCH (n:{label}) WHERE n.id IS NOT NULL RETURN n.id AS id")
+    ids = set()
+    for line in out.strip().splitlines():
+        v = line.strip().strip('"')
+        if v and v != "id":
+            ids.add(v)
+    return ids
+
+
+def lit(v):
+    return json.dumps(v, ensure_ascii=False) if not isinstance(v, bool) else ("true" if v else "false")
+
+
+def resolve_files(args):
+    files = []
+    for a in args:
+        if os.path.isdir(a):
+            files += sorted(glob.glob(os.path.join(a, "*.json")))
+        else:
+            hits = sorted(glob.glob(a))
+            files += hits if hits else [a]
+    seen, out = set(), []
+    for f in files:
+        if f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out
+
+
+PROV_KEYS = ("date", "commit", "pr", "session")   # provenance.<k> -> prov_<k> on the node
+# Anchor kinds authored by the lesson rather than derived from code: created on demand, not validated
+# against the structural/symbol graph. Topic is a theme; Operation is a decision point (git-push,
+# close-ticket, mutation-check...) that a reflex or a hook queries before the agent acts.
+AUTHORED_ANCHORS = {"Topic", "Operation"}
+
+
+def prov_props(l):
+    """Flatten the optional provenance object to flat prov_* props (Neo4j has no nested node maps)."""
+    p = l.get("provenance") or {}
+    return {f"prov_{k}": p[k] for k in PROV_KEYS if p.get(k)}
+
+
+def main():
+    args = [a for a in sys.argv[1:] if a != "--prune"]
+    prune = "--prune" in sys.argv[1:]
+    if not args:
+        print("usage: ./load-lessons [--prune] <lessons.json> [more.json ...] | <dir> | <glob>",
+              file=sys.stderr)
+        return 2
+
+    files = resolve_files(args)
+    lessons = []
+    for f in files:
+        lessons += json.load(open(f, encoding="utf-8"))["lessons"]
+
+    batch_ids = {l["id"] for l in lessons}
+    retired = [l for l in lessons if l.get("status") == "retired"]
+    live = [l for l in lessons if l.get("status") != "retired"]
+
+    # Validate anchors: fetch existing ids per derived label in ONE query each, check in memory.
+    labels = {a["type"] for l in live for a in l["anchors"] if a["type"] not in AUTHORED_ANCHORS}
+    present = {lbl: existing_ids(lbl) for lbl in sorted(labels)}
+
+    checked, resolved, missed = 0, 0, []
+    for l in live:
+        for a in l["anchors"]:
+            if a["type"] in AUTHORED_ANCHORS:
+                continue
+            checked += 1
+            if a["id"] in present.get(a["type"], ()):
+                resolved += 1
+            else:
+                missed.append((l["id"], a["type"], a["id"]))
+    missed_set = set(missed)
+
+    known_lessons = batch_ids | existing_ids("Lesson")
+    sup_edges, sup_missed = [], []
+    for l in live:
+        for sid in l.get("supersedes", []):
+            if sid in known_lessons:
+                sup_edges.append((l["id"], sid))
+            else:
+                sup_missed.append((l["id"], sid))
+
+    stmts = []
+    for l in retired:
+        stmts.append(f'MATCH (l:Lesson {{id:{lit(l["id"])}}}) DETACH DELETE l;')
+    for l in live:
+        props = {k: l[k] for k in ("title", "body", "kind", "scope", "confidence", "status")}
+        props.update(prov_props(l))
+        body = ", ".join(f"{k}: {lit(v)}" for k, v in sorted(props.items()))
+        stmts.append(f'MERGE (l:Lesson {{id:{lit(l["id"])}}}) SET l += {{{body}}};')
+    for l in live:
+        for a in l["anchors"]:
+            if a["type"] in AUTHORED_ANCHORS:
+                stmts.append(f'MERGE (x:{a["type"]} {{id:{lit(a["id"])}}});')
+            elif (l["id"], a["type"], a["id"]) in missed_set:
+                continue   # do not anchor to a node that does not exist
+            stmts.append(f'MATCH (l:Lesson {{id:{lit(l["id"])}}}),(x:{a["type"]} {{id:{lit(a["id"])}}}) '
+                         f'MERGE (l)-[:ANCHORS_TO]->(x);')
+    for lid, sid in sup_edges:
+        stmts.append(f'MATCH (l:Lesson {{id:{lit(lid)}}}),(old:Lesson {{id:{lit(sid)}}}) '
+                     f'MERGE (l)-[:SUPERSEDES]->(old);')
+    if stmts:
+        cy("\n".join(stmts))
+
+    pruned = []
+    if prune:
+        pruned = sorted(existing_ids("Lesson") - batch_ids)
+        if pruned:
+            cy("\n".join(f'MATCH (l:Lesson {{id:{lit(i)}}}) DETACH DELETE l;' for i in pruned))
+
+    print(f"Files          : {len(files)}")
+    print(f"Lessons loaded : {len(live)}")
+    if retired:
+        print(f"Retired        : {len(retired)} removed by status:retired")
+    print(f"Anchors        : {resolved}/{checked} resolved to a real node (Topic/Operation excluded)")
+    if sup_edges or sup_missed:
+        print(f"Supersedes     : {len(sup_edges)} edge(s), {len(sup_missed)} skipped (target unknown)")
+    if prune:
+        print(f"Pruned         : {len(pruned)} graph lesson(s) not in the loaded files")
+    if missed:
+        print("  ! anchors skipped because the node does not exist (fix the id or extract the symbol):",
+              file=sys.stderr)
+        for lid, t, nid in missed:
+            print(f"      {lid}: {t} {nid}", file=sys.stderr)
+    if sup_missed:
+        print("  ! supersedes skipped because the target lesson is unknown (fix the id):", file=sys.stderr)
+        for lid, sid in sup_missed:
+            print(f"      {lid} -> {sid}", file=sys.stderr)
+    if prune and pruned:
+        print(f"  ! pruned {len(pruned)} lesson(s) absent from the loaded files:", file=sys.stderr)
+        for i in pruned:
+            print(f"      {i}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

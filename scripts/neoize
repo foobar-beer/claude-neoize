@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""
+neoize - bring up the local knowledge graph, load lessons into it, and query it.
+
+The graph has two layers. The STRUCTURAL/SYMBOL layer is produced by a per-project collector (the
+`neoize-init` skill proposes one for your codebase, because what counts as structure is yours, not
+generic). The KNOWLEDGE layer is authored lessons in .neoize/lessons/*.json, loaded on top, and is
+fully generic. This CLI owns the database lifecycle and the generic knowledge layer.
+
+  neoize up                 # start the local Neo4j (docker compose, loopback only)
+  neoize down               # stop it (keeps the volume; `down --wipe` drops it too)
+  neoize status             # is it up, and what does it hold (node counts by label)
+  neoize load-lessons ...   # load authored lessons (delegates to scripts/load-lessons)
+  neoize load-graph <file>  # load a project collector's .cypher, resetting only the structural layer
+  neoize check [path]       # validate lessons files locally: schema, duplicate ids, dangling supersedes
+  neoize query "<cypher>"   # run one Cypher query against the running graph
+
+Connection from the environment, with local defaults matching the shipped docker-compose:
+  NEOIZE_NEO4J_CONTAINER (neoize-neo4j), NEOIZE_NEO4J_USER (neo4j), NEOIZE_NEO4J_PASSWORD (neoize-local)
+The compose file used by `up`/`down` is .neoize/docker-compose.neo4j.yml in your project if present,
+otherwise the bundled template.
+"""
+import argparse
+import glob
+import json
+import os
+import subprocess
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PLUGIN_ROOT = os.path.dirname(_HERE)          # scripts/ -> plugin root
+
+
+def _env():
+    return (os.environ.get("NEOIZE_NEO4J_CONTAINER", "neoize-neo4j"),
+            os.environ.get("NEOIZE_NEO4J_USER", "neo4j"),
+            os.environ.get("NEOIZE_NEO4J_PASSWORD", "neoize-local"))
+
+
+def _project_dir():
+    return os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+
+
+def _neoize_dir():
+    return os.path.join(_project_dir(), ".neoize")
+
+
+def _compose_file():
+    local = os.path.join(_neoize_dir(), "docker-compose.neo4j.yml")
+    if os.path.isfile(local):
+        return local
+    return os.path.join(_PLUGIN_ROOT, "templates", "docker-compose.neo4j.yml")
+
+
+def _container_running(container):
+    try:
+        out = subprocess.run(["docker", "ps", "--format", "{{.Names}}"],
+                             capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        print("docker not found on PATH.", file=sys.stderr)
+        return False
+    return container in out.stdout.split()
+
+
+def _cypher(script):
+    container, user, pw = _env()
+    return subprocess.run(["docker", "exec", "-i", container, "cypher-shell",
+                           "-u", user, "-p", pw, "--format", "plain"],
+                          input=script, text=True, capture_output=True, check=False)
+
+
+# ----------------------------------------------------------------------------- lifecycle
+def cmd_up(args):
+    compose = _compose_file()
+    print(f"Starting Neo4j from {compose} ...")
+    rc = subprocess.run(["docker", "compose", "-f", compose, "up", "-d"], check=False).returncode
+    if rc == 0:
+        print("Up. Browser: http://localhost:7474   Bolt: bolt://127.0.0.1:7687")
+    return rc
+
+
+def cmd_down(args):
+    compose = _compose_file()
+    cmd = ["docker", "compose", "-f", compose, "down"]
+    if args.wipe:
+        cmd.append("-v")
+        print("Stopping Neo4j and DROPPING its volume ...")
+    else:
+        print("Stopping Neo4j (volume kept) ...")
+    return subprocess.run(cmd, check=False).returncode
+
+
+def cmd_status(args):
+    container, _, _ = _env()
+    if not _container_running(container):
+        print(f"Neo4j container '{container}' is NOT running. Start it with: neoize up")
+        return 1
+    proc = _cypher("MATCH (n) RETURN labels(n)[0] AS label, count(*) AS n ORDER BY n DESC")
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stdout + proc.stderr)
+        return proc.returncode
+    print(f"Neo4j '{container}' is up. Node counts by label:")
+    print(proc.stdout.rstrip() or "  (empty graph)")
+    return 0
+
+
+def cmd_query(args):
+    container, _, _ = _env()
+    if not _container_running(container):
+        print(f"Neo4j container '{container}' is not running. Start it with: neoize up", file=sys.stderr)
+        return 1
+    proc = _cypher(args.cypher)
+    sys.stdout.write(proc.stdout)
+    sys.stderr.write(proc.stderr)
+    return proc.returncode
+
+
+# ----------------------------------------------------------------------------- lessons
+def cmd_load_lessons(args):
+    loader = os.path.join(_HERE, "load-lessons")
+    targets = args.paths or [os.path.join(_neoize_dir(), "lessons")]
+    return subprocess.run([sys.executable, loader, *(["--prune"] if args.prune else []), *targets],
+                          check=False).returncode
+
+
+def cmd_load_graph(args):
+    """Load a project collector's .cypher into the graph, resetting ONLY the structural projection.
+    The knowledge layer (Lesson, Topic, Operation) and any symbol layer (Symbol, File) are preserved,
+    because they are authored or expensive to rebuild. Structural nodes are deleted and rebuilt, so the
+    lesson-to-structural anchors drop with them: re-run `neoize load-lessons` immediately after, which
+    the command reminds you to do."""
+    container, _, _ = _env()
+    if not _container_running(container):
+        print(f"Neo4j container '{container}' is not running. Start it with: neoize up", file=sys.stderr)
+        return 1
+    if not os.path.isfile(args.file):
+        print(f"{args.file} not found.", file=sys.stderr)
+        return 1
+    cypher = open(args.file, encoding="utf-8").read()
+    reset = ("MATCH (n) WHERE NOT (n:Lesson OR n:Topic OR n:Operation OR n:Symbol OR n:File) "
+             "DETACH DELETE n;\n")
+    proc = _cypher(reset + cypher)
+    sys.stdout.write(proc.stdout)
+    sys.stderr.write(proc.stderr)
+    if proc.returncode != 0:
+        return proc.returncode
+    print(f"Loaded {args.file}. Structural projection reset; Lesson/Topic/Operation preserved.")
+    print("Re-run `neoize load-lessons` now, so lesson anchors to structural nodes resolve again.")
+    return 0
+
+
+def _iter_lesson_files(path):
+    if os.path.isdir(path):
+        return sorted(glob.glob(os.path.join(path, "*.json")))
+    hits = sorted(glob.glob(path))
+    return hits if hits else [path]
+
+
+def cmd_check(args):
+    """Validate lessons files WITHOUT touching the graph: required fields, duplicate ids, and
+    supersedes targets that no loaded file defines. Prints the denominator it examined."""
+    path = args.path or os.path.join(_neoize_dir(), "lessons")
+    files = _iter_lesson_files(path)
+    if not files:
+        print(f"INCONCLUSIVE: no lessons files found under {path}", file=sys.stderr)
+        return 2
+    required = {"id", "title", "body", "kind", "scope", "confidence", "status", "anchors"}
+    lessons, findings = [], []
+    for f in files:
+        try:
+            doc = json.load(open(f, encoding="utf-8"))
+        except Exception as exc:
+            findings.append(("unreadable", f, str(exc)))
+            continue
+        for l in doc.get("lessons", []):
+            lessons.append(l)
+            missing = required - set(l)
+            if missing:
+                findings.append(("missing-fields", l.get("id", "<no id>"), ", ".join(sorted(missing))))
+            for a in l.get("anchors", []):
+                if "type" not in a or "id" not in a:
+                    findings.append(("bad-anchor", l.get("id", "<no id>"), json.dumps(a)))
+    ids = [l.get("id") for l in lessons if l.get("id")]
+    seen = set()
+    for i in ids:
+        if i in seen:
+            findings.append(("duplicate-id", i, "defined more than once"))
+        seen.add(i)
+    known = set(ids)
+    for l in lessons:
+        for sid in l.get("supersedes", []):
+            if sid not in known:
+                findings.append(("dangling-supersedes", l.get("id", "<no id>"), f"-> {sid} (not in these files)"))
+
+    print(f"Checked        : {len(lessons)} lesson(s) across {len(files)} file(s)")
+    if not findings:
+        print("OK: no findings.")
+        return 0
+    print(f"\n{len(findings)} finding(s):", file=sys.stderr)
+    for kind, where, detail in findings:
+        print(f"  {kind:20s} {where:28s} {detail}", file=sys.stderr)
+    return 1
+
+
+# ----------------------------------------------------------------------------- main
+def main():
+    ap = argparse.ArgumentParser(description="Bring up, load and query the local knowledge graph.")
+    sub = ap.add_subparsers(dest="cmd")
+
+    sub.add_parser("up", help="start the local Neo4j").set_defaults(func=cmd_up)
+    d = sub.add_parser("down", help="stop the local Neo4j")
+    d.add_argument("--wipe", action="store_true", help="also drop the data volume")
+    d.set_defaults(func=cmd_down)
+    sub.add_parser("status", help="is it up, and what does it hold").set_defaults(func=cmd_status)
+
+    ll = sub.add_parser("load-lessons", help="load authored lessons into the graph")
+    ll.add_argument("paths", nargs="*", help="files/dirs/globs (default .neoize/lessons)")
+    ll.add_argument("--prune", action="store_true", help="delete graph lessons absent from the loaded set")
+    ll.set_defaults(func=cmd_load_lessons)
+
+    lg = sub.add_parser("load-graph", help="load a collector's .cypher, resetting only the structural layer")
+    lg.add_argument("file", help="the .cypher file written by .neoize/collect.py")
+    lg.set_defaults(func=cmd_load_graph)
+
+    ck = sub.add_parser("check", help="validate lessons files locally (no graph)")
+    ck.add_argument("path", nargs="?", help="file/dir/glob (default .neoize/lessons)")
+    ck.set_defaults(func=cmd_check)
+
+    q = sub.add_parser("query", help="run one Cypher query")
+    q.add_argument("cypher", help="the Cypher query")
+    q.set_defaults(func=cmd_query)
+
+    args = ap.parse_args()
+    if not getattr(args, "func", None):
+        ap.print_help()
+        return 2
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

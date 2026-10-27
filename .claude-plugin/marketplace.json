@@ -1,0 +1,12 @@
+{
+  "name": "foobar-beer",
+  "description": "Plugins from foobar.beer",
+  "owner": { "name": "Jakub Stonavsky", "url": "https://foobar.beer" },
+  "plugins": [
+    {
+      "name": "neoize",
+      "source": "./",
+      "description": "Turn a codebase and its hard-won knowledge into a local Neo4j graph Claude queries by relevance."
+    }
+  ]
+}

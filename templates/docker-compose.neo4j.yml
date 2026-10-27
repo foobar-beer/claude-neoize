@@ -1,0 +1,29 @@
+services:
+  neo4j:
+    image: neo4j:5.26.0-community
+    container_name: neoize-neo4j
+    environment:
+      # Local-only credentials. The neoize CLI and the loaders default to exactly these; override
+      # with NEOIZE_NEO4J_USER / NEOIZE_NEO4J_PASSWORD. Neo4j 5 requires a password of >= 8 chars.
+      NEO4J_AUTH: neo4j/neoize-local
+      NEO4J_server_memory_heap_max__size: 512M
+      # Nothing leaves this host: turn off the product-analytics and usage-report phone-home.
+      NEO4J_client_allow__telemetry: "false"
+      NEO4J_dbms_usage__report_enabled: "false"
+    ports:
+      # Bind to loopback ONLY. The default "7474:7474" publishes on 0.0.0.0 (the whole LAN); this is
+      # a local dev graph on a local password, so it must never be reachable off this host.
+      - "127.0.0.1:7474:7474"   # Browser (http://localhost:7474)
+      - "127.0.0.1:7687:7687"   # Bolt (cypher-shell, the MCP server)
+    volumes:
+      # Persistent so the graph survives a restart. It is only a projection of the authored JSON and
+      # the code, so it can always be rebuilt; the volume saves the reload, not the data.
+      - neoize_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p neoize-local 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+volumes:
+  neoize_data:

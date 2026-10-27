@@ -1,0 +1,10 @@
+{
+  "_comment": "Maps a tool call to an Operation id, so the PreToolUse hook pulls that operation's lessons at the moment it fires. Copy to .neoize/triggers.json in your project and edit. 'contains' is matched case-insensitively against the serialised tool_input; null means any call to the tool. The operation ids are yours to name; author lessons against them with an anchor {type:'Operation', id:'<here>'}.",
+  "triggers": [
+    { "tool": "Bash", "contains": "git push", "operation": "git-push" },
+    { "tool": "Bash", "contains": "git fetch", "operation": "git-fetch" },
+    { "tool": "Bash", "contains": "git pull", "operation": "git-fetch" },
+    { "tool": "Bash", "contains": "pkill", "operation": "pkill" },
+    { "tool": "Bash", "contains": "pgrep", "operation": "pkill" }
+  ]
+}

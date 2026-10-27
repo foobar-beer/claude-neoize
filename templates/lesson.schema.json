@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/foobar-beer/claude-neoize/lesson.schema.json",
+  "title": "claude-neoize lessons file",
+  "description": "A file of authored lessons loaded by scripts/load-lessons. Each lesson is a piece of knowledge anchored to the entity it concerns, so it is retrieved by relevance rather than read wholesale.",
+  "type": "object",
+  "required": ["lessons"],
+  "properties": {
+    "_source": {
+      "type": "string",
+      "description": "Free-text note on what this file groups and where it came from. Ignored by the loader."
+    },
+    "lessons": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/lesson" }
+    }
+  },
+  "$defs": {
+    "lesson": {
+      "type": "object",
+      "required": ["id", "title", "body", "kind", "scope", "confidence", "status", "anchors"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "Stable kebab-case id. The loader MERGEs on it, so changing it creates a new node."
+        },
+        "title": { "type": "string", "description": "One line, the claim the lesson makes." },
+        "body": {
+          "type": "string",
+          "description": "The full lesson: the trap, the mechanism and the fix, in enough detail to act on without reading the code."
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["rule", "gotcha", "reference", "convention"],
+          "description": "rule = a standing instruction; gotcha = a trap and its fix; reference = a fact catalogue; convention = a project norm."
+        },
+        "scope": {
+          "type": "string",
+          "enum": ["universal", "situational"],
+          "description": "universal = always applies; situational = applies when editing the anchored code or running the anchored operation."
+        },
+        "confidence": {
+          "type": "string",
+          "enum": ["measured", "observed", "inferred"],
+          "description": "measured = demonstrated with a control; observed = seen once; inferred = reasoned, not yet proven."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "historical", "retired"],
+          "description": "active = loaded normally; historical = loaded and kept as a postmortem; retired = a tombstone, the node is deleted and not loaded."
+        },
+        "anchors": {
+          "type": "array",
+          "minItems": 1,
+          "description": "What this lesson is about. Topic and Operation are authored (created on demand). Any other type must name a node the collector produced (Symbol, File, or a project structural label), or the loader reports and skips it.",
+          "items": {
+            "type": "object",
+            "required": ["type", "id"],
+            "additionalProperties": false,
+            "properties": {
+              "type": { "type": "string", "description": "A node label: Topic, Operation, Symbol, File, or a project structural label." },
+              "id": { "type": "string", "description": "The id of the node to anchor to." }
+            }
+          }
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Flattened onto the node as prov_* props, so a lesson's age is queryable.",
+          "properties": {
+            "date": { "type": "string", "description": "ISO date the lesson was learned (absolute, never relative)." },
+            "commit": { "type": "string" },
+            "pr": { "type": "string" },
+            "session": { "type": "string" }
+          }
+        },
+        "supersedes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Lesson ids this lesson replaces. Each becomes (this)-[:SUPERSEDES]->(old). A target not in the graph or this load pass is reported and skipped."
+        }
+      }
+    }
+  }
+}

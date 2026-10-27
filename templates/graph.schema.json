@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/foobar-beer/claude-neoize/graph.schema.json",
+  "title": "claude-neoize structural graph",
+  "description": "The output shape a project collector (.neoize/collect.py) writes to .neoize/graph.json. It is a projection of the code, regenerated and never hand-edited. The sibling .neoize/graph.cypher is the MERGE form loaded into Neo4j; keep both in sync.",
+  "type": "object",
+  "required": ["nodes", "edges"],
+  "properties": {
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["label", "id"],
+        "properties": {
+          "label": { "type": "string", "description": "The node label, a domain entity kind (Module, Service, Route, Entity, ...). Chosen for THIS project, not generic." },
+          "id": { "type": "string", "description": "Stable id, unique within the label. A lesson anchors to {type: label, id: id}." },
+          "props": { "type": "object", "description": "Flat scalar properties (Neo4j has no nested node maps)." }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "from", "to"],
+        "properties": {
+          "type": { "type": "string", "description": "Relationship type, a verb the project reasons along (DEPENDS_ON, IMPLEMENTS, GRANTS, CALLS, ...)." },
+          "from": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } },
+          "to": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } },
+          "props": { "type": "object" }
+        }
+      }
+    },
+    "counts": { "type": "object", "description": "Optional node/edge counts the collector prints; informational." }
+  }
+}

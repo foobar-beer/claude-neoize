@@ -1,0 +1,32 @@
+{
+  "_source": "An example lessons file. Copy it, rename it, and author your own. Validated by templates/lesson.schema.json. Loaded with: neoize load-lessons <this file>.",
+  "lessons": [
+    {
+      "id": "example-topic-lesson",
+      "title": "A lesson anchored to a Topic is pulled by theme, the way you used to scroll a doc",
+      "body": "A Topic groups lessons about one subsystem or theme. Pull every lesson on a topic with MATCH (l:Lesson)-[:ANCHORS_TO]->(:Topic {id:'<topic>'}) RETURN l.title, l.body. Topic nodes are created on demand by the loader, so you only ever author the lesson, never the topic. Keep a topic narrow enough that pulling it is useful and broad enough that it has more than one lesson.",
+      "kind": "convention",
+      "scope": "situational",
+      "confidence": "observed",
+      "status": "active",
+      "provenance": { "date": "2026-10-27" },
+      "anchors": [
+        { "type": "Topic", "id": "getting-started" }
+      ]
+    },
+    {
+      "id": "example-operation-lesson",
+      "title": "A lesson anchored to an Operation is injected by the hook before you act",
+      "body": "An Operation is a decision point that fires reflexively and bites: a git push into a shared tree, a release, a destructive migration. Anchor a lesson to it and add a row to .neoize/triggers.json mapping the tool call to the operation id. The PreToolUse hook then prints the lesson titles the moment the operation fires, and tells you the query to pull the bodies, so the check does not depend on remembering. Finding zero lessons on an operation is the expected case and is fine.",
+      "kind": "rule",
+      "scope": "situational",
+      "confidence": "observed",
+      "status": "active",
+      "provenance": { "date": "2026-10-27" },
+      "anchors": [
+        { "type": "Operation", "id": "git-push" },
+        { "type": "Topic", "id": "getting-started" }
+      ]
+    }
+  ]
+}
