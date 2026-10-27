@@ -1,5 +1,7 @@
 # neoize
 
+![A real project's knowledge graph in neoize: 14,207 nodes and 26,454 relationships. The red cloud is 11,649 code symbols; the brighter clusters are the protocols, tiers, modules, lessons and topics woven through them.](assets/hero.png)
+
 Turn a codebase and the hard-won knowledge around it into a local Neo4j graph that Claude queries by
 relevance, instead of a wiki nobody reads and a CLAUDE.md that grows until nobody can find anything in
 it.
