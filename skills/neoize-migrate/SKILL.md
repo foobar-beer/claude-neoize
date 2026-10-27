@@ -85,8 +85,38 @@ its topic and the query to pull it, the way a migrated section should read:
 Leave universal rules as prose. Do NOT leave the full note in both places. Two correct copies is how the
 source file acquires its next stale note, because the stale one gets cited with confidence.
 
+## Step 5 - reconcile the project's agent-facing processes (propose, then CONFIRM)
+
+Moving the lessons and the structure is only half of it. A project carries agent-facing PROCESSES that
+assume the old world, and a migration that leaves them untouched points the next agent back at what you
+just retired. So inventory them and propose an update for each, the same confirm-before-modify discipline
+as Step 4: present the proposed edits as a list and apply none until the user approves. This is a
+proposal step, never an auto-rewrite of the user's processes.
+
+Inventory the project's slash commands, skills, subagents, hooks and agent instruction files (commonly
+`.claude/commands/`, `.claude/skills/`, `.claude/agents/`, `.claude/hooks/`, `CLAUDE.md`, `AGENTS.md`,
+`.github/copilot-instructions.md`, a `GEMINI.md`). Read each and classify it against the graph world:
+
+- **A process that tells the agent to grep or read the code for a product fact** should query the graph
+  FIRST (the `read_neo4j_cypher` tool, or the saved `.neoize/queries/`), and reach for the code only once
+  the graph has come up short. Propose that reordering.
+- **A process that names a retired bespoke tool** (an old graph CLI, an old lessons path, an old container
+  or MCP tool name) should point at the neoize equivalent: the control tools (`graph_up`, `load_lessons`,
+  `load_graph`, `rebuild_structure`, ...), the `.neoize/` paths, and the plugin's MCP server tool names.
+  Propose the exact rename or path change.
+- **A process that captures end-of-session knowledge** (a wrap or hand-off routine) should route its
+  knowledge through `/neoize:wrap`, so a learned fact lands in its one home rather than being pasted back
+  into an always-on file. Propose that it call wrap.
+- **A reflex or reminder that fired through a now-retired hook** should move to `.neoize/triggers.json`
+  plus a lesson anchored to the matching `Operation`, so the neoize hook surfaces it. Propose the trigger
+  row and the lesson.
+
+Present the full set of proposed edits (file, the line or block, the change, and why) and apply only the
+ones the user approves. Leave a process alone when it does not touch the graph world at all.
+
 ## Finish
 
 Report: counts per bucket, lessons authored and loaded with the resolved-anchor denominator, which
-source blocks you turned into pointers, and what you deliberately left as prose (the universal rules)
-and as history (the changelog). Name anything you could not classify and left for the user to decide.
+source blocks you turned into pointers, which agent-facing processes you proposed to update and which the
+user approved, and what you deliberately left as prose (the universal rules) and as history (the
+changelog). Name anything you could not classify and left for the user to decide.
