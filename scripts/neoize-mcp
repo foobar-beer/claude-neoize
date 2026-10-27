@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""
+neoize-mcp - a self-contained, read-only MCP server for the local neoize Neo4j graph.
+
+It speaks the MCP stdio transport (newline-delimited JSON-RPC 2.0) and runs queries by shelling into
+the Neo4j container's cypher-shell, the same way the rest of neoize talks to the graph. That is the
+whole point: it has NO third-party dependency, so a user installs the plugin and queries the graph
+with nothing to `pip`/`uv`/`pipx` first. It needs only python3 (for this script) and docker (for the
+graph), both of which neoize already requires.
+
+Two tools, named to match the conventional Neo4j MCP server so existing queries and habits carry over:
+  - read_neo4j_cypher : run a READ Cypher query and return the rows.
+  - get_neo4j_schema  : list the labels, relationship types and property keys in the graph.
+
+Read-only is enforced here, because cypher-shell has no read-only flag: a query containing a write
+clause (CREATE, MERGE, DELETE, SET, REMOVE, DROP, FOREACH, LOAD CSV) is refused. This is a local dev
+lens, not a hardened boundary, but it stops an accidental write through the query path.
+
+Connection from the environment, with local defaults matching the shipped docker-compose:
+  NEOIZE_NEO4J_CONTAINER (neoize-neo4j), NEOIZE_NEO4J_USER (neo4j), NEOIZE_NEO4J_PASSWORD (neoize-local)
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+CONTAINER = os.environ.get("NEOIZE_NEO4J_CONTAINER", "neoize-neo4j")
+USER = os.environ.get("NEOIZE_NEO4J_USER", "neo4j")
+PASSWORD = os.environ.get("NEOIZE_NEO4J_PASSWORD", "neoize-local")
+
+SERVER_NAME = "neoize-neo4j"
+SERVER_VERSION = "0.1.0"
+DEFAULT_PROTOCOL = "2025-06-18"
+
+# A read query must not carry any of these write clauses. Word-boundary matched, case-insensitive.
+WRITE_CLAUSE = re.compile(
+    r"\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|FOREACH|LOAD\s+CSV)\b", re.IGNORECASE)
+
+TOOLS = [
+    {
+        "name": "read_neo4j_cypher",
+        "description": "Run a read-only Cypher query against the local neoize knowledge graph and "
+                       "return the rows as text. Write clauses are refused. Optional $params are "
+                       "passed as Cypher parameters.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The read-only Cypher query."},
+                "params": {"type": "object", "description": "Optional map of Cypher parameters, e.g. {\"topic\": \"getting-started\"}."}
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "get_neo4j_schema",
+        "description": "Return the labels, relationship types and property keys present in the graph, "
+                       "so you know what you can query.",
+        "inputSchema": {"type": "object", "properties": {}}
+    }
+]
+
+
+def _cypher(query, params=None):
+    """Run one query through the container's cypher-shell. Returns (ok, text)."""
+    cmd = ["docker", "exec", "-i", CONTAINER, "cypher-shell",
+           "-u", USER, "-p", PASSWORD, "--format", "plain"]
+    for k, v in (params or {}).items():
+        # cypher-shell parameter: "name => <cypher literal>". A JSON-encoded scalar is a valid literal
+        # (a string becomes quoted, a number stays bare), which is exactly what we want.
+        cmd += ["--param", f"{k} => {json.dumps(v, ensure_ascii=False)}"]
+    try:
+        proc = subprocess.run(cmd, input=query, text=True, capture_output=True, timeout=30)
+    except FileNotFoundError:
+        return False, "docker not found on PATH. Is Docker installed and running?"
+    except subprocess.TimeoutExpired:
+        return False, "query timed out after 30s."
+    if proc.returncode != 0:
+        return False, (proc.stderr or proc.stdout or "cypher-shell failed").strip()
+    return True, proc.stdout.strip()
+
+
+def tool_read(args):
+    query = (args or {}).get("query", "")
+    if not query.strip():
+        return True, "error: empty query."
+    if WRITE_CLAUSE.search(query):
+        return True, "refused: this server is read-only and the query contains a write clause."
+    ok, out = _cypher(query, (args or {}).get("params"))
+    return ok, out if out else ("(no rows)" if ok else out)
+
+
+def tool_schema(args):
+    q = ("CALL db.labels() YIELD label WITH collect(label) AS labels "
+         "CALL db.relationshipTypes() YIELD relationshipType WITH labels, collect(relationshipType) AS rels "
+         "CALL db.propertyKeys() YIELD propertyKey "
+         "RETURN labels, rels, collect(propertyKey) AS propertyKeys")
+    ok, out = _cypher(q)
+    return ok, out
+
+
+DISPATCH = {"read_neo4j_cypher": tool_read, "get_neo4j_schema": tool_schema}
+
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def reply(mid, result):
+    send({"jsonrpc": "2.0", "id": mid, "result": result})
+
+
+def error(mid, code, message):
+    send({"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": message}})
+
+
+def handle(msg):
+    method = msg.get("method")
+    mid = msg.get("id")
+    is_request = mid is not None
+
+    if method == "initialize":
+        proto = (msg.get("params") or {}).get("protocolVersion") or DEFAULT_PROTOCOL
+        reply(mid, {
+            "protocolVersion": proto,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}
+        })
+    elif method == "tools/list":
+        reply(mid, {"tools": TOOLS})
+    elif method == "tools/call":
+        params = msg.get("params") or {}
+        fn = DISPATCH.get(params.get("name"))
+        if not fn:
+            error(mid, -32602, f"unknown tool: {params.get('name')}")
+            return
+        ok, text = fn(params.get("arguments") or {})
+        reply(mid, {"content": [{"type": "text", "text": text}], "isError": not ok})
+    elif method == "ping":
+        reply(mid, {})
+    elif is_request:
+        # Any other request: respond with method-not-found rather than hanging the client.
+        error(mid, -32601, f"method not found: {method}")
+    # Notifications (no id), e.g. notifications/initialized, get no response.
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except Exception:
+            continue
+        try:
+            handle(msg)
+        except Exception as exc:
+            mid = msg.get("id")
+            if mid is not None:
+                error(mid, -32603, f"internal error: {exc}")
+
+
+if __name__ == "__main__":
+    main()

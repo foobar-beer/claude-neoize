@@ -33,12 +33,14 @@ The graph has two layers, and they are deliberately different in how portable th
 
 ## Install
 
-Prerequisites, all on your PATH:
+Prerequisites, both of which you very likely already have:
 
 - Docker, with the daemon running. The graph is a local Neo4j container, bound to loopback only.
 - `python3`.
-- `mcp-neo4j-cypher`, the read-only MCP server Claude queries the graph through. Install it with
-  `uv tool install mcp-neo4j-cypher` or `pipx install mcp-neo4j-cypher`.
+
+That is the whole list. The read-only MCP server Claude queries the graph through is **bundled in the
+plugin** (`scripts/neoize-mcp`, pure standard library, it reaches the graph through the container), so
+there is nothing to `pip`, `uv` or `pipx` first.
 
 Then, in Claude Code:
 
@@ -134,8 +136,9 @@ hooks/hooks.json                  PreToolUse registration
 hooks/graph-operation-reminder.py the operation reminder (triggers are data, in your .neoize/)
 scripts/neoize                    the CLI
 scripts/load-lessons              the lesson loader
+scripts/neoize-mcp                the bundled read-only Neo4j MCP server (no dependency)
 templates/                        compose, schemas, example lessons, triggers, saved queries
-.mcp.json                         the read-only Neo4j MCP server
+.mcp.json                         registers the bundled MCP server
 ```
 
 ## License

@@ -21,9 +21,9 @@ Report what is present and what is missing before changing anything.
 
 - `docker` on PATH and the daemon running (`docker ps`).
 - `python3` on PATH.
-- `mcp-neo4j-cypher` on PATH. If missing, tell the user to install it, for example
-  `uv tool install mcp-neo4j-cypher` or `pipx install mcp-neo4j-cypher`, and stop until it is there.
-  This binary is what the plugin's bundled MCP server runs, so Claude cannot query the graph without it.
+
+That is the whole list. The MCP server Claude queries the graph through is bundled in the plugin
+(`${CLAUDE_PLUGIN_ROOT}/scripts/neoize-mcp`, pure standard library), so there is nothing else to install.
 
 If a prerequisite is missing, say exactly which one and how to get it, then stop. Do not work around it.
 
