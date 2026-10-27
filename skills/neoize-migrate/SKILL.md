@@ -14,6 +14,19 @@ The failure mode to avoid is a migration that produces TWO copies of every fact,
 lesson, which then drift. So migration ends with the source prose replaced by a short pointer, not left
 as a second home for the same fact.
 
+## Driving neoize: call the tools, not a shell path
+
+Every neoize operation runs as a **plugin MCP tool**, so drive it by calling the tool, with nothing on
+PATH and no script for the human to run. The `neoize ...` commands named below are the exact CLI the
+tools wrap, kept as an optional terminal fallback. The map:
+
+- `graph_status` / `graph_up` / `graph_down`: is the graph up, start it, stop it.
+- `load_lessons`: load the authored lessons (`neoize load-lessons`).
+- `load_graph`: load the structural .cypher (`neoize load-graph`).
+- `rebuild_structure`: regenerate the structure from the code (runs `.neoize/collect.py`).
+- `check_lessons` / `check_graph`: the offline validations (`neoize check` / `neoize check-graph`).
+- `read_neo4j_cypher` / `get_neo4j_schema`: query the graph and read its shape.
+
 ## Step 1 - inventory the source
 
 Ask the user which files are the knowledge to migrate (commonly `CLAUDE.md`, a `docs/` or `*-toolbox/`

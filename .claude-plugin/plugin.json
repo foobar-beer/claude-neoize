@@ -1,7 +1,7 @@
 {
   "$schema": "https://code.claude.com/schemas/plugin.json",
   "name": "neoize",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Turn a codebase and its hard-won knowledge into a local Neo4j graph Claude queries by relevance, instead of a wiki nobody reads.",
   "author": { "name": "Jakub Stonavsky", "url": "https://foobar.beer" },
   "homepage": "https://github.com/foobar-beer/claude-neoize",

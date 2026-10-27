@@ -14,6 +14,19 @@ the homes.
 Run this after the work is done and verified. Capturing an unverified claim as a lesson launders a guess
 into the record, so only write down what you actually confirmed, and say what you did not.
 
+## Driving neoize: call the tools, not a shell path
+
+Every neoize operation runs as a **plugin MCP tool**, so drive it by calling the tool, with nothing on
+PATH and no script for the human to run. The `neoize ...` commands named below are the exact CLI the
+tools wrap, kept as an optional terminal fallback. The map:
+
+- `graph_status` / `graph_up` / `graph_down`: is the graph up, start it, stop it.
+- `load_lessons`: load the authored lessons (`neoize load-lessons`).
+- `load_graph`: load the structural .cypher (`neoize load-graph`).
+- `rebuild_structure`: regenerate the structure from the code (runs `.neoize/collect.py`).
+- `check_lessons` / `check_graph`: the offline validations (`neoize check` / `neoize check-graph`).
+- `read_neo4j_cypher` / `get_neo4j_schema`: query the graph and read its shape.
+
 ## Step 1 - read the project's routing config
 
 The non-graph homes are project-specific, so read `.neoize/wrap.md` for where each kind of fact goes

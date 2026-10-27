@@ -87,9 +87,23 @@ build files and registries and writes `.neoize/graph.json` plus a Cypher form. I
 regenerate it, never hand-edit it. The small JSON is committed and diffable; a large symbol dump, if you
 add one, is a rebuildable artifact and stays out of git.
 
-## The CLI
+## The control surface: MCP tools
 
-`scripts/neoize` owns the database lifecycle and the generic knowledge layer:
+The bundled MCP server (`scripts/neoize-mcp`) is the control surface. A Claude or MCP session drives the
+whole graph by calling tools, with nothing on PATH and no script for the human to run:
+
+- `read_neo4j_cypher`, `get_neo4j_schema`: query the graph and read its shape (read-only).
+- `graph_status`, `graph_up`, `graph_down`: report on, start, or stop the local graph.
+- `load_lessons`, `load_graph`, `rebuild_structure`: load the lessons, load the structure, or regenerate
+  the structure from the code.
+- `check_lessons`, `check_graph`: the offline validations.
+
+The query tool is read-only (a write clause is refused). The control tools are explicitly mutating, and
+the host gates each tool call, so a write still asks.
+
+### The same operations as a CLI (optional, for a terminal)
+
+`scripts/neoize` is the exact CLI the tools wrap, kept for a human in a terminal or a non-MCP context:
 
 ```
 neoize up                 # start the local Neo4j (loopback only)

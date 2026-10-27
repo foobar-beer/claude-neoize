@@ -10,6 +10,19 @@ You are bringing the graph back into agreement with the code and the authored le
 projection: it is always safe to rebuild, never hand-edit it in the Neo4j browser, because a reload
 loses the edit. Run this against a running graph (`neoize status`; `neoize up` if it is down).
 
+## Driving neoize: call the tools, not a shell path
+
+Every neoize operation runs as a **plugin MCP tool**, so drive it by calling the tool, with nothing on
+PATH and no script for the human to run. The `neoize ...` commands named below are the exact CLI the
+tools wrap, kept as an optional terminal fallback. The map:
+
+- `graph_status` / `graph_up` / `graph_down`: is the graph up, start it, stop it.
+- `load_lessons`: load the authored lessons (`neoize load-lessons`).
+- `load_graph`: load the structural .cypher (`neoize load-graph`).
+- `rebuild_structure`: regenerate the structure from the code (runs `.neoize/collect.py`).
+- `check_lessons` / `check_graph`: the offline validations (`neoize check` / `neoize check-graph`).
+- `read_neo4j_cypher` / `get_neo4j_schema`: query the graph and read its shape.
+
 ## Reload the knowledge layer
 
 Authored lessons changed (edited, added, retired, moved between files):

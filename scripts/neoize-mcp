@@ -1,23 +1,37 @@
 #!/usr/bin/env python3
 """
-neoize-mcp - a self-contained, read-only MCP server for the local neoize Neo4j graph.
+neoize-mcp - a self-contained MCP server for the local neoize Neo4j graph.
 
-It speaks the MCP stdio transport (newline-delimited JSON-RPC 2.0) and runs queries by shelling into
-the Neo4j container's cypher-shell, the same way the rest of neoize talks to the graph. That is the
-whole point: it has NO third-party dependency, so a user installs the plugin and queries the graph
-with nothing to `pip`/`uv`/`pipx` first. It needs only python3 (for this script) and docker (for the
-graph), both of which neoize already requires.
+It speaks the MCP stdio transport (newline-delimited JSON-RPC 2.0) and is the one control surface a
+Claude or MCP session needs: it runs every neoize operation as a tool call, so the session drives the
+whole graph (query it, bring it up or down, load lessons, rebuild the structure) without the human
+running a shell script and without anything on PATH. It has NO third-party dependency: it needs only
+python3 (for this script) and docker (for the graph), both of which neoize already requires.
 
-Two tools, named to match the conventional Neo4j MCP server so existing queries and habits carry over:
+Two kinds of tools:
+
+READ (safe):
   - read_neo4j_cypher : run a READ Cypher query and return the rows.
   - get_neo4j_schema  : list the labels, relationship types and property keys in the graph.
 
-Read-only is enforced here, because cypher-shell has no read-only flag: a query containing a write
-clause (CREATE, MERGE, DELETE, SET, REMOVE, DROP, FOREACH, LOAD CSV) is refused. This is a local dev
-lens, not a hardened boundary, but it stops an accidental write through the query path.
+CONTROL (mutating): these drive the local graph and the project's .neoize/ files. They run the bundled
+`neoize` CLI (or the project's collector) internally, so the logic lives in one place.
+  - graph_status      : is the graph up, and what does it hold.
+  - graph_up          : start the local Neo4j container (docker compose).
+  - graph_down        : stop it (optionally drop the data volume).
+  - load_lessons      : load the authored lessons into the graph.
+  - load_graph        : load the structural .cypher, resetting only the structural projection.
+  - rebuild_structure : regenerate the structural graph from the code (runs .neoize/collect.py).
+  - check_lessons     : validate the lessons files offline (no graph).
+  - check_graph       : run the project's structural check offline (.neoize/check.py).
+
+Read-only is enforced on read_neo4j_cypher, because cypher-shell has no read-only flag: a query
+containing a write clause (CREATE, MERGE, DELETE, SET, REMOVE, DROP, FOREACH, LOAD CSV) is refused. The
+control tools are explicitly mutating and the host gates each tool call, so a write still asks.
 
 Connection from the environment, with local defaults matching the shipped docker-compose:
   NEOIZE_NEO4J_CONTAINER (neoize-neo4j), NEOIZE_NEO4J_USER (neo4j), NEOIZE_NEO4J_PASSWORD (neoize-local)
+The project is located from CLAUDE_PROJECT_DIR (or the current directory), the same way the CLI does.
 """
 import json
 import os
@@ -30,37 +44,26 @@ USER = os.environ.get("NEOIZE_NEO4J_USER", "neo4j")
 PASSWORD = os.environ.get("NEOIZE_NEO4J_PASSWORD", "neoize-local")
 
 SERVER_NAME = "neoize-neo4j"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 DEFAULT_PROTOCOL = "2025-06-18"
+
+_HERE = os.path.dirname(os.path.abspath(__file__))     # the plugin's scripts/ dir
+_CLI = os.path.join(_HERE, "neoize")                   # the bundled CLI the control tools reuse
 
 # A read query must not carry any of these write clauses. Word-boundary matched, case-insensitive.
 WRITE_CLAUSE = re.compile(
     r"\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|FOREACH|LOAD\s+CSV)\b", re.IGNORECASE)
 
-TOOLS = [
-    {
-        "name": "read_neo4j_cypher",
-        "description": "Run a read-only Cypher query against the local neoize knowledge graph and "
-                       "return the rows as text. Write clauses are refused. Optional $params are "
-                       "passed as Cypher parameters.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "The read-only Cypher query."},
-                "params": {"type": "object", "description": "Optional map of Cypher parameters, e.g. {\"topic\": \"getting-started\"}."}
-            },
-            "required": ["query"]
-        }
-    },
-    {
-        "name": "get_neo4j_schema",
-        "description": "Return the labels, relationship types and property keys present in the graph, "
-                       "so you know what you can query.",
-        "inputSchema": {"type": "object", "properties": {}}
-    }
-]
+
+def _project_dir():
+    return os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
 
 
+def _neoize_dir():
+    return os.path.join(_project_dir(), ".neoize")
+
+
+# --------------------------------------------------------------------------- read tools (cypher-shell)
 def _cypher(query, params=None):
     """Run one query through the container's cypher-shell. Returns (ok, text)."""
     cmd = ["docker", "exec", "-i", CONTAINER, "cypher-shell",
@@ -85,7 +88,8 @@ def tool_read(args):
     if not query.strip():
         return True, "error: empty query."
     if WRITE_CLAUSE.search(query):
-        return True, "refused: this server is read-only and the query contains a write clause."
+        return True, "refused: this server's query tool is read-only and the query contains a write " \
+                     "clause. Use a control tool (load_lessons, load_graph, rebuild_structure) for a write."
     ok, out = _cypher(query, (args or {}).get("params"))
     return ok, out if out else ("(no rows)" if ok else out)
 
@@ -95,11 +99,172 @@ def tool_schema(args):
          "CALL db.relationshipTypes() YIELD relationshipType WITH labels, collect(relationshipType) AS rels "
          "CALL db.propertyKeys() YIELD propertyKey "
          "RETURN labels, rels, collect(propertyKey) AS propertyKeys")
-    ok, out = _cypher(q)
-    return ok, out
+    return _cypher(q)
 
 
-DISPATCH = {"read_neo4j_cypher": tool_read, "get_neo4j_schema": tool_schema}
+# ------------------------------------------------------------------------- control tools (CLI / scripts)
+def _run(argv, timeout=600):
+    """Run a bundled script and return (ok, combined-output). Control tools reuse the CLI so there is
+    one copy of the lifecycle and load logic."""
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError as exc:
+        return False, f"not found: {exc}"
+    except subprocess.TimeoutExpired:
+        return False, f"operation timed out after {timeout}s."
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if not out:
+        out = "(done)" if proc.returncode == 0 else "(failed with no output)"
+    return proc.returncode == 0, out
+
+
+def _cli(*sub, timeout=600):
+    return _run([sys.executable, _CLI, *sub], timeout=timeout)
+
+
+def tool_graph_status(args):
+    return _cli("status", timeout=60)
+
+
+def tool_graph_up(args):
+    return _cli("up", timeout=300)
+
+
+def tool_graph_down(args):
+    sub = ["down"] + (["--wipe"] if (args or {}).get("wipe") else [])
+    return _cli(*sub, timeout=120)
+
+
+def tool_load_lessons(args):
+    args = args or {}
+    sub = ["load-lessons"] + list(args.get("paths") or []) + (["--prune"] if args.get("prune") else [])
+    return _cli(*sub)
+
+
+def tool_load_graph(args):
+    args = args or {}
+    f = args.get("file") or os.path.join(_neoize_dir(), "graph.cypher")
+    return _cli("load-graph", f)
+
+
+def tool_rebuild_structure(args):
+    collect = os.path.join(_neoize_dir(), "collect.py")
+    if not os.path.isfile(collect):
+        return False, f"no collector at {collect} (this project ships none; run neoize-init to scaffold one)."
+    return _run([sys.executable, collect])
+
+
+def tool_check_lessons(args):
+    args = args or {}
+    sub = ["check"] + ([args["path"]] if args.get("path") else [])
+    return _cli(*sub, timeout=120)
+
+
+def tool_check_graph(args):
+    return _cli("check-graph", timeout=120)
+
+
+TOOLS = [
+    {
+        "name": "read_neo4j_cypher",
+        "description": "Run a read-only Cypher query against the local neoize knowledge graph and "
+                       "return the rows as text. Write clauses are refused. Optional $params are "
+                       "passed as Cypher parameters.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The read-only Cypher query."},
+                "params": {"type": "object", "description": "Optional map of Cypher parameters, e.g. {\"topic\": \"getting-started\"}."}
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "get_neo4j_schema",
+        "description": "Return the labels, relationship types and property keys present in the graph, "
+                       "so you know what you can query.",
+        "inputSchema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "graph_status",
+        "description": "Report whether the local graph is up and the node counts by label. Read-only.",
+        "inputSchema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "graph_up",
+        "description": "MUTATING. Start the local Neo4j container (docker compose up). Safe to call when "
+                       "it is already running.",
+        "inputSchema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "graph_down",
+        "description": "MUTATING. Stop the local Neo4j container. Set wipe to also drop the data volume "
+                       "(the graph is a projection, so it can be rebuilt).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"wipe": {"type": "boolean", "description": "Also drop the data volume."}}
+        }
+    },
+    {
+        "name": "load_lessons",
+        "description": "MUTATING. Load the authored lessons into the graph (default .neoize/lessons). "
+                       "Validates every anchor and prints the resolved denominator. Set prune to drop "
+                       "graph lessons absent from the loaded set (only with the full lessons set).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "paths": {"type": "array", "items": {"type": "string"}, "description": "Files, dirs or globs. Default .neoize/lessons."},
+                "prune": {"type": "boolean", "description": "Delete graph lessons not in the loaded set."}
+            }
+        }
+    },
+    {
+        "name": "load_graph",
+        "description": "MUTATING. Load the structural .cypher into the graph, resetting ONLY the "
+                       "structural projection and preserving the lesson, topic, operation, symbol and "
+                       "file layers. Re-run load_lessons afterwards. Default file .neoize/graph.cypher.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"file": {"type": "string", "description": "The .cypher written by the collector. Default .neoize/graph.cypher."}}
+        }
+    },
+    {
+        "name": "rebuild_structure",
+        "description": "MUTATING (writes files). Regenerate the structural graph from the code by running "
+                       "the project's .neoize/collect.py, which writes .neoize/graph.json and graph.cypher. "
+                       "Follow with load_graph then load_lessons to push it into the graph.",
+        "inputSchema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "check_lessons",
+        "description": "Validate the lessons files offline (no graph): required fields, duplicate ids and "
+                       "dangling supersedes. Read-only. Default path .neoize/lessons.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "File, dir or glob. Default .neoize/lessons."}}
+        }
+    },
+    {
+        "name": "check_graph",
+        "description": "Run the project's structural check offline (.neoize/check.py), if it ships one. "
+                       "Read-only.",
+        "inputSchema": {"type": "object", "properties": {}}
+    }
+]
+
+
+DISPATCH = {
+    "read_neo4j_cypher": tool_read,
+    "get_neo4j_schema": tool_schema,
+    "graph_status": tool_graph_status,
+    "graph_up": tool_graph_up,
+    "graph_down": tool_graph_down,
+    "load_lessons": tool_load_lessons,
+    "load_graph": tool_load_graph,
+    "rebuild_structure": tool_rebuild_structure,
+    "check_lessons": tool_check_lessons,
+    "check_graph": tool_check_graph,
+}
 
 
 def send(msg):
