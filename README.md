@@ -114,6 +114,13 @@ describe now-fixed behaviour. A fixed bug leaves its description behind, and a n
 mechanism in the present tense goes false while nothing errors, so reconciling on a close is part of the
 loop, not an afterthought.
 
+Run `/neoize:wrap` at the end of a session. It decides what the session learned and routes each fact to
+its one home: a situational gotcha becomes a lesson in the graph, a durable rule goes to the always-on
+rules file, history goes to the changelog, session state goes to agent memory. The homes other than the
+graph are named in `.neoize/wrap.md`, which `init` scaffolds for you. The rule it enforces is that each
+fact lives in exactly one place, because a fact written twice drifts and the stale copy gets cited with
+confidence.
+
 ## What is generic and what you bring
 
 Generic, shipped, works anywhere: the lesson schema and loader, the operation hook, the Neo4j compose
@@ -132,6 +139,7 @@ can scope it as a follow-up if you want it.
 skills/neoize-init/               set up a project
 skills/neoize-migrate/            move existing notes into lessons
 skills/neoize-refresh/            keep the graph current
+skills/neoize-wrap/               end-of-session capture: route what was learned to its one home
 hooks/hooks.json                  PreToolUse registration
 hooks/graph-operation-reminder.py the operation reminder (triggers are data, in your .neoize/)
 scripts/neoize                    the CLI

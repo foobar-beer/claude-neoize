@@ -54,6 +54,9 @@ Create, if absent:
   `load-lessons` has something real to load.
 - `.neoize/triggers.json` - copy from `${CLAUDE_PLUGIN_ROOT}/templates/triggers.template.json`, then
   trim it to the operations this project actually has.
+- `.neoize/wrap.md` - copy from `${CLAUDE_PLUGIN_ROOT}/templates/wrap.template.md`, then set its paths to
+  this project's real stores (the always-on rules file, the changelog, the agent-memory location). This
+  is what `/neoize:wrap` reads to route end-of-session facts to their one home.
 - `.neoize/queries/` - copy the saved retrieval queries from `${CLAUDE_PLUGIN_ROOT}/templates/queries/`.
 
 Do not overwrite a file that already exists. Report what you created and what you left alone.
