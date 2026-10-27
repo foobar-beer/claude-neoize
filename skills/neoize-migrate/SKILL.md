@@ -58,7 +58,13 @@ id is wrong or that node was never extracted. Fix the id, do not leave a lesson 
 Then pull a few lessons back through the MCP server by topic and by operation and confirm the bodies
 read correctly. Carry the count.
 
-## Step 4 - replace the prose with a pointer
+## Step 4 - replace the prose with a pointer (the first modifying step - CONFIRM FIRST)
+
+Everything up to here was ADDITIVE and reversible: you authored new lesson files under `.neoize/` and
+loaded them, and touched none of the user's existing files. This step is the first that MODIFIES the
+source. So before editing anything, show the user the planned changes as a list (which prose block in
+which file becomes which pointer) and get an explicit confirmation. Do not edit a source file until they
+say go. If they decline, stop and leave the authored lessons in place; nothing is lost.
 
 For every block of prose that became a lesson, replace it in the source file with a one-line pointer to
 its topic and the query to pull it, the way a migrated section should read:

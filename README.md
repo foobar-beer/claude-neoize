@@ -140,6 +140,7 @@ skills/neoize-init/               set up a project
 skills/neoize-migrate/            move existing notes into lessons
 skills/neoize-refresh/            keep the graph current
 skills/neoize-wrap/               end-of-session capture: route what was learned to its one home
+skills/neoize-cypher-help/        print example Cypher tailored to this graph, for the Neo4j Browser
 hooks/hooks.json                  PreToolUse registration
 hooks/graph-operation-reminder.py the operation reminder (triggers are data, in your .neoize/)
 scripts/neoize                    the CLI
