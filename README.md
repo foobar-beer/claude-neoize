@@ -53,6 +53,17 @@ Then, in Claude Code:
 
 Restart Claude Code once after installing, so the bundled MCP server registers.
 
+### Connection
+
+neoize talks to one local Neo4j container over loopback. The connection (container name, user,
+password) is set through the plugin's own options, which Claude Code asks for when you enable the
+plugin and stores for you. All three have working defaults that match the shipped compose, so a
+standard local setup needs no input. The password defaults to a local throwaway and is marked
+sensitive, so a real one you set is kept in Claude Code's secure store rather than a settings file.
+Nothing is read from an ambient environment variable: the value the MCP server and the hook use is the
+one you configured. For a terminal run of the CLI outside the plugin you can still export the
+`NEOIZE_NEO4J_*` variables yourself.
+
 ## Quick start
 
 In the project you want a graph for:
@@ -117,9 +128,10 @@ neoize check [path]       # validate lessons files locally, before they touch th
 neoize query "<cypher>"   # run one Cypher query
 ```
 
-Connection comes from the environment, with local defaults matching the shipped compose:
-`NEOIZE_NEO4J_CONTAINER` (neoize-neo4j), `NEOIZE_NEO4J_USER` (neo4j), `NEOIZE_NEO4J_PASSWORD`
-(neoize-local). The password is a local loopback throwaway, not a secret.
+For a terminal run outside Claude Code the connection comes from the environment, with local defaults
+matching the shipped compose: `NEOIZE_NEO4J_CONTAINER` (neoize-neo4j), `NEOIZE_NEO4J_USER` (neo4j),
+`NEOIZE_NEO4J_PASSWORD` (neoize-local). Inside the plugin these come from the options you configured
+instead. The password is a local loopback throwaway, not a secret.
 
 ## Keeping it fresh
 

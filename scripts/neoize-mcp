@@ -29,7 +29,9 @@ Read-only is enforced on read_neo4j_cypher, because cypher-shell has no read-onl
 containing a write clause (CREATE, MERGE, DELETE, SET, REMOVE, DROP, FOREACH, LOAD CSV) is refused. The
 control tools are explicitly mutating and the host gates each tool call, so a write still asks.
 
-Connection from the environment, with local defaults matching the shipped docker-compose:
+Connection from the environment. Under the plugin these variables are injected by .mcp.json from the
+user's configured options (userConfig), so nothing ambient is read; for a direct run they can be set by
+hand, and either way they fall back to the local docker-compose defaults:
   NEOIZE_NEO4J_CONTAINER (neoize-neo4j), NEOIZE_NEO4J_USER (neo4j), NEOIZE_NEO4J_PASSWORD (neoize-local)
 The project is located from CLAUDE_PROJECT_DIR (or the current directory), the same way the CLI does.
 """
@@ -39,9 +41,9 @@ import re
 import subprocess
 import sys
 
-CONTAINER = os.environ.get("NEOIZE_NEO4J_CONTAINER", "neoize-neo4j")
-USER = os.environ.get("NEOIZE_NEO4J_USER", "neo4j")
-PASSWORD = os.environ.get("NEOIZE_NEO4J_PASSWORD", "neoize-local")
+CONTAINER = os.environ.get("NEOIZE_NEO4J_CONTAINER") or "neoize-neo4j"
+USER = os.environ.get("NEOIZE_NEO4J_USER") or "neo4j"
+PASSWORD = os.environ.get("NEOIZE_NEO4J_PASSWORD") or "neoize-local"
 
 SERVER_NAME = "neoize-neo4j"
 SERVER_VERSION = "0.2.0"

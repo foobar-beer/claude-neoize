@@ -32,7 +32,8 @@ lesson). Topic and Operation nodes are the authored anchor kinds and are created
 
 Loads via `docker exec ... cypher-shell` (no python driver needed). Connection from the environment,
 with dev defaults: NEOIZE_NEO4J_CONTAINER (neoize-neo4j), NEOIZE_NEO4J_USER (neo4j),
-NEOIZE_NEO4J_PASSWORD (neoize-local).
+NEOIZE_NEO4J_PASSWORD (neoize-local). Under the plugin these are injected from the user's configured
+options; this loader just reads the environment it is handed.
 """
 import glob
 import json
@@ -40,9 +41,9 @@ import os
 import subprocess
 import sys
 
-ENV = (os.environ.get("NEOIZE_NEO4J_CONTAINER", "neoize-neo4j"),
-       os.environ.get("NEOIZE_NEO4J_USER", "neo4j"),
-       os.environ.get("NEOIZE_NEO4J_PASSWORD", "neoize-local"))
+ENV = (os.environ.get("NEOIZE_NEO4J_CONTAINER") or "neoize-neo4j",
+       os.environ.get("NEOIZE_NEO4J_USER") or "neo4j",
+       os.environ.get("NEOIZE_NEO4J_PASSWORD") or "neoize-local")
 
 
 def cy(query):

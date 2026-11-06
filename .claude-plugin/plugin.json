@@ -1,12 +1,33 @@
 {
   "$schema": "https://code.claude.com/schemas/plugin.json",
   "name": "neoize",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Turn a codebase and its hard-won knowledge into a local Neo4j graph Claude queries by relevance, instead of a wiki nobody reads.",
   "author": { "name": "Jakub Stonavsky", "url": "https://foobar.beer" },
   "icon": ".claude-plugin/icon.png",
   "homepage": "https://github.com/foobar-beer/claude-neoize",
   "repository": "https://github.com/foobar-beer/claude-neoize",
   "license": "MIT",
-  "keywords": ["neo4j", "knowledge-graph", "mcp", "lessons", "code-graph"]
+  "keywords": ["neo4j", "knowledge-graph", "mcp", "lessons", "code-graph"],
+  "userConfig": {
+    "neo4j_container": {
+      "type": "string",
+      "title": "Neo4j container name",
+      "description": "Name of the local Docker container the graph runs in. The shipped compose uses neoize-neo4j.",
+      "default": "neoize-neo4j"
+    },
+    "neo4j_user": {
+      "type": "string",
+      "title": "Neo4j user",
+      "description": "Database user neoize connects as.",
+      "default": "neo4j"
+    },
+    "neo4j_password": {
+      "type": "string",
+      "title": "Neo4j password",
+      "description": "Password for that user. A local loopback throwaway by default; change it only if you changed the container's own password.",
+      "default": "neoize-local",
+      "sensitive": true
+    }
+  }
 }
