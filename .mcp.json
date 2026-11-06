@@ -3,7 +3,11 @@
     "neo4j": {
       "command": "python3",
       "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/neoize-mcp"],
-      "env": {}
+      "env": {
+        "NEOIZE_NEO4J_CONTAINER": "${user_config.neo4j_container}",
+        "NEOIZE_NEO4J_USER": "${user_config.neo4j_user}",
+        "NEOIZE_NEO4J_PASSWORD": "${user_config.neo4j_password}"
+      }
     }
   }
 }

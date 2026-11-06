@@ -18,17 +18,28 @@ is {"tool": "<ToolName>", "contains": "<substring or null>", "operation": "<oper
 `contains` substring is matched case-insensitively against the JSON-serialised tool_input; null means
 "any call to this tool".
 
-Connection comes from the environment, with dev defaults matching the shipped docker-compose:
-NEOIZE_NEO4J_CONTAINER (neoize-neo4j), NEOIZE_NEO4J_USER (neo4j), NEOIZE_NEO4J_PASSWORD (neoize-local).
+Connection comes from the plugin's configured options, which Claude Code exports to a hook process as
+CLAUDE_PLUGIN_OPTION_NEO4J_CONTAINER / _USER / _PASSWORD. For a direct (non-plugin) run the matching
+NEOIZE_NEO4J_* environment variable is honoured instead, then the local docker-compose default. The
+password is a loopback throwaway, never read from an ambient credential the user did not configure.
 """
 import json
 import os
 import subprocess
 import sys
 
-CONTAINER = os.environ.get("NEOIZE_NEO4J_CONTAINER", "neoize-neo4j")
-USER = os.environ.get("NEOIZE_NEO4J_USER", "neo4j")
-PASSWORD = os.environ.get("NEOIZE_NEO4J_PASSWORD", "neoize-local")
+
+def _conf(key, legacy_env, default):
+    # Prefer the value the user set at plugin-configure time (userConfig), then a hand-set env var for
+    # a terminal run, then the shipped default. Empty counts as unset so a blank option falls through.
+    return (os.environ.get("CLAUDE_PLUGIN_OPTION_" + key)
+            or os.environ.get(legacy_env)
+            or default)
+
+
+CONTAINER = _conf("NEO4J_CONTAINER", "NEOIZE_NEO4J_CONTAINER", "neoize-neo4j")
+USER = _conf("NEO4J_USER", "NEOIZE_NEO4J_USER", "neo4j")
+PASSWORD = _conf("NEO4J_PASSWORD", "NEOIZE_NEO4J_PASSWORD", "neoize-local")
 
 
 def _triggers_path():
