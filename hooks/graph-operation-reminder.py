@@ -55,6 +55,54 @@ def _triggers_path():
     return None
 
 
+def _product():
+    """The product whose Operation lessons to pull, so one shared server's many products do not cross
+    reminders. NEOIZE_PRODUCT, then .neoize/project.json (project dir then cwd), then the repo name."""
+    env = os.environ.get("NEOIZE_PRODUCT")
+    if env:
+        return env
+    for base in (os.environ.get("CLAUDE_PROJECT_DIR"), os.getcwd()):
+        if not base:
+            continue
+        try:
+            p = json.load(open(os.path.join(base, ".neoize", "project.json"), encoding="utf-8")).get("product")
+            if p:
+                return p
+        except Exception:
+            pass
+    proj = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    try:
+        top = subprocess.run(["git", "-C", proj, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, check=False).stdout.strip()
+        if top:
+            return os.path.basename(top)
+    except Exception:
+        pass
+    return os.path.basename(os.path.abspath(proj))
+
+
+def _project_json():
+    for base in (os.environ.get("CLAUDE_PROJECT_DIR"), os.getcwd()):
+        if not base:
+            continue
+        try:
+            return json.load(open(os.path.join(base, ".neoize", "project.json"), encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _container():
+    """The container to reach. project.json "container" wins; else neoize-<product> in project mode; else
+    the configured/global default, so the reminder queries the same graph the rest of neoize uses."""
+    pj = _project_json()
+    if pj.get("container"):
+        return pj["container"]
+    if (pj.get("mode") or "global").lower() == "project":
+        return f"neoize-{_product()}"
+    return CONTAINER
+
+
 def load_triggers():
     path = _triggers_path()
     if not path:
@@ -73,13 +121,16 @@ def load_triggers():
 
 
 def lessons_for(operation):
-    """Titles of the lessons anchored to this Operation, or None if the graph cannot be reached."""
-    query = (f"MATCH (l:Lesson)-[:ANCHORS_TO]->(:Operation {{id:'{operation}'}}) "
-             f"RETURN l.title ORDER BY l.title")
+    """Titles of the lessons anchored to this Operation IN THIS PRODUCT, or None if the graph cannot be
+    reached. Scoped by product so one shared server's other products never leak their reminders in."""
+    query = ("MATCH (l:Lesson {product:$product})-[:ANCHORS_TO]->"
+             "(:Operation {product:$product, id:$op}) RETURN l.title ORDER BY l.title")
     try:
         out = subprocess.run(
-            ["docker", "exec", "-i", CONTAINER, "cypher-shell",
-             "-u", USER, "-p", PASSWORD, "--format", "plain"],
+            ["docker", "exec", "-i", _container(), "cypher-shell",
+             "-u", USER, "-p", PASSWORD, "--format", "plain",
+             "--param", f"product => {json.dumps(_product())}",
+             "--param", f"op => {json.dumps(operation)}"],
             input=query, text=True, capture_output=True, timeout=8,
         )
     except Exception:
@@ -118,8 +169,8 @@ def main():
                          f'is not reachable right now (check it is up). Proceeding.\n')
         sys.exit(0)
 
-    query = (f"MATCH (l:Lesson)-[:ANCHORS_TO]->(:Operation {{id:'{operation}'}}) "
-             f"RETURN l.title, l.body")
+    query = (f"MATCH (l:Lesson {{product:$product}})-[:ANCHORS_TO]->"
+             f"(:Operation {{product:$product, id:'{operation}'}}) RETURN l.title, l.body")
     if titles:
         listing = "".join(f"\n  - {t}" for t in titles)
         sys.stderr.write(

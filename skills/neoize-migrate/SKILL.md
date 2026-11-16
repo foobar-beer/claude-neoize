@@ -14,6 +14,10 @@ The failure mode to avoid is a migration that produces TWO copies of every fact,
 lesson, which then drift. So migration ends with the source prose replaced by a short pointer, not left
 as a second home for the same fact.
 
+`neoize-init` already set this project's product. Every lesson the loader writes is stamped with it
+automatically, so you never put a product into a lesson; these migrated lessons land only in this
+product's graph even when the server is shared with others.
+
 ## Driving neoize: call the tools, not a shell path
 
 Every neoize operation runs as a **plugin MCP tool**, so drive it by calling the tool, with nothing on

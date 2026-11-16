@@ -24,10 +24,16 @@ CONTROL (mutating): these drive the local graph and the project's .neoize/ files
   - rebuild_structure : regenerate the structural graph from the code (runs .neoize/collect.py).
   - check_lessons     : validate the lessons files offline (no graph).
   - check_graph       : run the project's structural check offline (.neoize/check.py).
+  - share_lessons     : import generic lessons from another product's files into this project.
 
 Read-only is enforced on read_neo4j_cypher, because cypher-shell has no read-only flag: a query
 containing a write clause (CREATE, MERGE, DELETE, SET, REMOVE, DROP, FOREACH, LOAD CSV) is refused. The
 control tools are explicitly mutating and the host gates each tool call, so a write still asks.
+
+One shared Neo4j serves every product. Every node carries a `product` discriminant and $product is bound
+on every read to this project's product (resolved from NEOIZE_PRODUCT, .neoize/project.json, or the repo
+name), so a query scopes to the project with {product:$product}; a cross-product read overrides it through
+params. The structural reset and the loaders scope by product too, so products never collide.
 
 Connection from the environment. Under the plugin these variables are injected by .mcp.json from the
 user's configured options (userConfig), so nothing ambient is read; for a direct run they can be set by
@@ -46,7 +52,7 @@ USER = os.environ.get("NEOIZE_NEO4J_USER") or "neo4j"
 PASSWORD = os.environ.get("NEOIZE_NEO4J_PASSWORD") or "neoize-local"
 
 SERVER_NAME = "neoize-neo4j"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.3.0"
 DEFAULT_PROTOCOL = "2025-06-18"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))     # the plugin's scripts/ dir
@@ -65,14 +71,58 @@ def _neoize_dir():
     return os.path.join(_project_dir(), ".neoize")
 
 
+def _project_json():
+    try:
+        return json.load(open(os.path.join(_neoize_dir(), "project.json"), encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _product():
+    """The product this project's nodes belong to, so one server holds many products without colliding.
+    NEOIZE_PRODUCT, then .neoize/project.json, then the repo name, then the dir name. It is bound as
+    $product on every read, so a query scopes to this project with {product:$product}."""
+    env = os.environ.get("NEOIZE_PRODUCT")
+    if env:
+        return env
+    p = _project_json().get("product")
+    if p:
+        return p
+    proj = _project_dir()
+    try:
+        top = subprocess.run(["git", "-C", proj, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, check=False).stdout.strip()
+        if top:
+            return os.path.basename(top)
+    except Exception:
+        pass
+    return os.path.basename(os.path.abspath(proj))
+
+
+def _container():
+    """The container to reach: project.json "container" wins; else neoize-<product> in project mode; else
+    the configured/global default. The control tools go through the CLI, which resolves this the same way."""
+    pj = _project_json()
+    if pj.get("container"):
+        return pj["container"]
+    if (pj.get("mode") or "global").lower() == "project":
+        return f"neoize-{_product()}"
+    return CONTAINER
+
+
 # --------------------------------------------------------------------------- read tools (cypher-shell)
 def _cypher(query, params=None):
-    """Run one query through the container's cypher-shell. Returns (ok, text)."""
-    cmd = ["docker", "exec", "-i", CONTAINER, "cypher-shell",
+    """Run one query through the container's cypher-shell. Returns (ok, text). $product is always bound
+    (to this project's product) so a query can scope with {product:$product}; a caller may override it
+    (or add its own params) for a deliberate cross-product read."""
+    cmd = ["docker", "exec", "-i", _container(), "cypher-shell",
            "-u", USER, "-p", PASSWORD, "--format", "plain"]
-    for k, v in (params or {}).items():
-        # cypher-shell parameter: "name => <cypher literal>". A JSON-encoded scalar is a valid literal
-        # (a string becomes quoted, a number stays bare), which is exactly what we want.
+    merged = {"product": _product()}
+    if params:
+        merged.update(params)
+    for k, v in merged.items():
+        # cypher-shell parameter: "name => <cypher literal>". A JSON-encoded scalar or list is a valid
+        # literal (a string becomes quoted, a number stays bare), which is exactly what we want.
         cmd += ["--param", f"{k} => {json.dumps(v, ensure_ascii=False)}"]
     try:
         proc = subprocess.run(cmd, input=query, text=True, capture_output=True, timeout=30)
@@ -85,6 +135,18 @@ def _cypher(query, params=None):
     return True, proc.stdout.strip()
 
 
+# Knowledge-layer labels that are per-product: a query that names one but does not scope by product gets
+# another product's rows too. A gentle, non-blocking nudge, since a cross-product read is sometimes meant.
+_SCOPED_LABEL = re.compile(r"\b(Lesson|Topic|Operation)\b")
+
+
+def _scope_note(query):
+    if "product" in query or not _SCOPED_LABEL.search(query):
+        return ""
+    return ("\n\n(note: not scoped by product, so rows may span products. $product is pre-bound to this "
+            "project's product; add {product:$product} to the node pattern to limit it.)")
+
+
 def tool_read(args):
     query = (args or {}).get("query", "")
     if not query.strip():
@@ -93,7 +155,9 @@ def tool_read(args):
         return True, "refused: this server's query tool is read-only and the query contains a write " \
                      "clause. Use a control tool (load_lessons, load_graph, rebuild_structure) for a write."
     ok, out = _cypher(query, (args or {}).get("params"))
-    return ok, out if out else ("(no rows)" if ok else out)
+    if not ok:
+        return ok, out
+    return ok, (out or "(no rows)") + _scope_note(query)
 
 
 def tool_schema(args):
@@ -101,7 +165,11 @@ def tool_schema(args):
          "CALL db.relationshipTypes() YIELD relationshipType WITH labels, collect(relationshipType) AS rels "
          "CALL db.propertyKeys() YIELD propertyKey "
          "RETURN labels, rels, collect(propertyKey) AS propertyKeys")
-    return _cypher(q)
+    ok, out = _cypher(q)
+    if ok:
+        out += (f"\n\ncurrent product: {_product()}  (every node carries a `product`; scope project nodes "
+                f"with {{product:$product}}, which is pre-bound on every read)")
+    return ok, out
 
 
 # ------------------------------------------------------------------------- control tools (CLI / scripts)
@@ -166,12 +234,39 @@ def tool_check_graph(args):
     return _cli("check-graph", timeout=120)
 
 
+def tool_share(args):
+    """Import generic lessons from another product's lessons files INTO THIS project, writing
+    .neoize/lessons/shared-from-<from>.json. It is a file copy filtered to generic knowledge: only
+    Topic/Operation-anchored lessons travel, structural anchors are dropped. With list=true, or with
+    neither lessons nor all, it only lists the donor's shareable lessons. The written file is NOT loaded
+    automatically; review it, then load_lessons it."""
+    args = args or {}
+    src = args.get("from")
+    src_dir = args.get("from_dir")
+    if not src:
+        return False, "share needs 'from' (the donor product id)."
+    if not src_dir:
+        return False, "share needs 'from_dir' (path to the donor project, its .neoize, or its lessons dir)."
+    sub = ["share", "--from", src, "--from-dir", src_dir]
+    if args.get("list") or not (args.get("lessons") or args.get("all")):
+        return _cli(*sub, "--list")
+    if args.get("all"):
+        sub.append("--all")
+    else:
+        sub += ["--lessons", ",".join(args["lessons"])]
+    return _cli(*sub)
+
+
 TOOLS = [
     {
         "name": "read_neo4j_cypher",
         "description": "Run a read-only Cypher query against the local neoize knowledge graph and "
-                       "return the rows as text. Write clauses are refused. Optional $params are "
-                       "passed as Cypher parameters.",
+                       "return the rows as text. Write clauses are refused. One shared graph holds many "
+                       "products and every node carries a `product`; $product is pre-bound to THIS "
+                       "project's product, so scope project nodes with {product:$product} (e.g. "
+                       "MATCH (l:Lesson {product:$product})-[:ANCHORS_TO]->(:Topic {product:$product, "
+                       "id:'x'})). Optional $params are passed as Cypher parameters and may override "
+                       "$product for a deliberate cross-product read.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -251,6 +346,26 @@ TOOLS = [
         "description": "Run the project's structural check offline (.neoize/check.py), if it ships one. "
                        "Read-only.",
         "inputSchema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "share_lessons",
+        "description": "MUTATING (writes a file). Import generic lessons from another product's lessons "
+                       "files INTO THIS project, as .neoize/lessons/shared-from-<from>.json. Only "
+                       "Topic/Operation-anchored lessons travel and their structural anchors are dropped, "
+                       "because a symbol belongs to its own product. With list=true (or neither lessons "
+                       "nor all) it only lists the donor's shareable lessons so you can pick. The file is "
+                       "NOT loaded automatically: review it, then call load_lessons on it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "from": {"type": "string", "description": "Donor product id (names the written file)."},
+                "from_dir": {"type": "string", "description": "Path to the donor project, its .neoize, or its lessons dir."},
+                "lessons": {"type": "array", "items": {"type": "string"}, "description": "Lesson ids to import."},
+                "all": {"type": "boolean", "description": "Import every shareable lesson in the donor."},
+                "list": {"type": "boolean", "description": "List the donor's shareable lessons and stop."}
+            },
+            "required": ["from", "from_dir"]
+        }
     }
 ]
 
@@ -266,6 +381,7 @@ DISPATCH = {
     "rebuild_structure": tool_rebuild_structure,
     "check_lessons": tool_check_lessons,
     "check_graph": tool_check_graph,
+    "share_lessons": tool_share,
 }
 
 

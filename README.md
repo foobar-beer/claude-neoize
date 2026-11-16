@@ -33,6 +33,26 @@ The graph has two layers, and they are deliberately different in how portable th
   universal extractor that would fit nowhere. Instead the setup skill reads your code and proposes a
   collector for you to approve.
 
+## Products and modes
+
+Every node in the graph carries a **product** discriminant, a short name for the product it belongs to.
+That is what lets one Neo4j hold more than one product at once without their nodes running into each
+other. A product can span several repos: give each repo's `.neoize/project.json` the same product id and
+they feed one graph. The id defaults to the repo name; `neoize product --set` changes it.
+
+Because the discriminant is in the data, you choose at setup how the server is run. It is only a
+lifecycle choice:
+
+- **global** (the default) runs one shared Neo4j for the whole machine, at `~/.neoize/`. Every product you
+  set up lives in it, kept apart by the discriminant. This is the mode to pick when one person works
+  across several products and may want to carry a lesson from one to another.
+- **project** gives a project its own Neo4j, its own container and volume and ports. Pick it when a graph
+  must stay self-contained. It is still product-stamped, so it stays compatible with the shared server and
+  can be merged or shared into it later.
+
+Either way, `/neoize:share` moves the generic half of one product's knowledge into another on purpose: a
+lesson about a topic or an operation travels, a lesson about one product's own code does not.
+
 ## Install
 
 Prerequisites, both of which you very likely already have:
@@ -64,6 +84,11 @@ Nothing is read from an ambient environment variable: the value the MCP server a
 one you configured. For a terminal run of the CLI outside the plugin you can still export the
 `NEOIZE_NEO4J_*` variables yourself.
 
+The product and the mode are a per-project choice, not a plugin option, so they live in
+`.neoize/project.json` (which `init` writes and you version-control) rather than in the plugin settings.
+In project mode the container the tools reach is `neoize-<product>`, derived from that file; in global
+mode it is the configured `neoize-neo4j`.
+
 ## Quick start
 
 In the project you want a graph for:
@@ -73,10 +98,11 @@ In the project you want a graph for:
 /neoize:migrate    # moves your existing CLAUDE.md / docs / notes into lessons
 ```
 
-`init` sets up `.neoize/` in your repo (you version-control it), starts the local Neo4j, and walks you
-through proposing the structural schema for your codebase. `migrate` reads the prose knowledge you
-already have, sorts it into lessons anchored to topics and operations, loads it, and replaces each
-migrated block with a one-line pointer so the same fact never lives in two places.
+`init` sets up `.neoize/` in your repo (you version-control it), has you confirm the product id and the
+server mode, starts Neo4j and walks you through proposing the structural schema for your codebase. If you
+already run neoize for another product, `init` can seed this one from its lessons. `migrate` reads the
+prose knowledge you already have, sorts it into lessons anchored to topics and operations, loads it, and
+replaces each migrated block with a one-line pointer so the same fact never lives in two places.
 
 Ask the graph anything through the MCP server once it is up, for example "pull the lessons on the proxy
 subsystem" or "what breaks if I change this module".
@@ -105,11 +131,13 @@ add one, is a rebuildable artifact and stays out of git.
 The bundled MCP server (`scripts/neoize-mcp`) is the control surface. A Claude or MCP session drives the
 whole graph by calling tools, with nothing on PATH and no script for the human to run:
 
-- `read_neo4j_cypher`, `get_neo4j_schema`: query the graph and read its shape (read-only).
-- `graph_status`, `graph_up`, `graph_down`: report on, start, or stop the local graph.
+- `read_neo4j_cypher`, `get_neo4j_schema`: query the graph and read its shape (read-only). `$product` is
+  pre-bound to this project's product, so a query scopes to it with `{product:$product}`.
+- `graph_status`, `graph_up`, `graph_down`: report on, start, or stop the graph.
 - `load_lessons`, `load_graph`, `rebuild_structure`: load the lessons, load the structure, or regenerate
   the structure from the code.
 - `check_lessons`, `check_graph`: the offline validations.
+- `share_lessons`: import another product's generic lessons into this project.
 
 The query tool is read-only (a write clause is refused). The control tools are explicitly mutating, and
 the host gates each tool call, so a write still asks.
@@ -119,18 +147,21 @@ the host gates each tool call, so a write still asks.
 `scripts/neoize` is the exact CLI the tools wrap, kept for a human in a terminal or a non-MCP context:
 
 ```
-neoize up                 # start the local Neo4j (loopback only)
+neoize up                 # start the Neo4j (shared ~/.neoize in global mode, the project's own in project mode)
 neoize down [--wipe]      # stop it; --wipe also drops the data volume
-neoize status             # is it up, and node counts by label
+neoize status             # is it up, this product's node counts and the roster of products on the server
 neoize load-lessons [p]   # load authored lessons (default .neoize/lessons); --prune drops removed ones
-neoize load-graph <file>  # load the collector's .cypher, resetting only the structural layer
+neoize load-graph <file>  # load the collector's .cypher, resetting only this product's structural layer
 neoize check [path]       # validate lessons files locally, before they touch the graph
-neoize query "<cypher>"   # run one Cypher query
+neoize query "<cypher>"   # run one Cypher query ($product is bound to this project's product)
+neoize product [--set ID] [--mode global|project]   # print or set the product and mode
+neoize share --from P --from-dir DIR [--list | --lessons a,b | --all]   # import product P's generic lessons
 ```
 
 For a terminal run outside Claude Code the connection comes from the environment, with local defaults
 matching the shipped compose: `NEOIZE_NEO4J_CONTAINER` (neoize-neo4j), `NEOIZE_NEO4J_USER` (neo4j),
-`NEOIZE_NEO4J_PASSWORD` (neoize-local). Inside the plugin these come from the options you configured
+`NEOIZE_NEO4J_PASSWORD` (neoize-local). `NEOIZE_PRODUCT` overrides the resolved product and `NEOIZE_HOME`
+the shared server location. Inside the plugin the connection comes from the options you configured
 instead. The password is a local loopback throwaway, not a secret.
 
 ## Keeping it fresh
@@ -149,6 +180,26 @@ graph are named in `.neoize/wrap.md`, which `init` scaffolds for you. The rule i
 fact lives in exactly one place, because a fact written twice drifts and the stale copy gets cited with
 confidence.
 
+## Upgrading an existing graph
+
+A graph built before the product discriminant has nodes with no product on them and a collector that
+emits `{id:...}` keys. Upgrading is safe, because the graph is only a projection of your files: you wipe
+it and rebuild under the new code; nothing authored is lost (lessons are the JSON files, structure
+comes from the collector). Per project:
+
+1. Install this version and restart Claude Code so the new MCP server registers.
+2. Write `.neoize/project.json` with `neoize product --set <id> --mode <global|project>`. To keep running
+   the project's existing container under project mode, add its name: `{"product":"<id>", "mode":"project",
+   "container":"<existing-container>"}`. To consolidate into one shared server instead, use `global`.
+3. Update the collector so every MERGE key carries the product: change its emit to
+   `{product:$product, id:...}`. `neoize load-graph` refuses the old `{id:...}` form, which is the reminder
+   if you forget.
+4. Rebuild clean. In project mode: `neoize down --wipe`, `neoize up`, then `neoize load-graph` and
+   `neoize load-lessons`. In global mode: `neoize up` (the shared server), then the same two loads; once
+   `neoize status` shows the product, retire the old per-project container and its volume.
+
+`neoize status` then shows the product stamped on every count and the roster of products on the server.
+
 ## What is generic and what you bring
 
 Generic, shipped, works anywhere: the lesson schema and loader, the operation hook, the Neo4j compose
@@ -164,17 +215,18 @@ can scope it as a follow-up if you want it.
 ```
 .claude-plugin/plugin.json        plugin manifest
 .claude-plugin/marketplace.json   marketplace entry
-skills/neoize-init/               set up a project
+skills/neoize-init/               set up a project (product id, mode, schema, optional seed)
 skills/neoize-migrate/            move existing notes into lessons
 skills/neoize-refresh/            keep the graph current
 skills/neoize-wrap/               end-of-session capture: route what was learned to its one home
+skills/neoize-share/              import another product's generic lessons into this project
 skills/neoize-cypher-help/        print example Cypher tailored to this graph, for the Neo4j Browser
 hooks/hooks.json                  PreToolUse registration
 hooks/graph-operation-reminder.py the operation reminder (triggers are data, in your .neoize/)
 scripts/neoize                    the CLI
 scripts/load-lessons              the lesson loader
 scripts/neoize-mcp                the bundled read-only Neo4j MCP server (no dependency)
-templates/                        compose, schemas, example lessons, triggers, saved queries
+templates/                        compose, schemas, example lessons, triggers, project, saved queries
 .mcp.json                         registers the bundled MCP server
 ```
 

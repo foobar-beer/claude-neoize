@@ -1,3 +1,8 @@
+# Explicit compose project name. Without it, compose derives the project from the directory holding this
+# file, which is `.neoize` for a project-mode compose, so every project-mode graph would collapse onto the
+# same project `neoize` and a `docker compose down` in one would tear down another's container (and the
+# shared server). In project mode init sets this to neoize-<product>; keep it unique per server.
+name: neoize
 services:
   neo4j:
     image: neo4j:5.26.0-community

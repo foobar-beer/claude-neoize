@@ -14,6 +14,10 @@ the homes.
 Run this after the work is done and verified. Capturing an unverified claim as a lesson launders a guess
 into the record, so only write down what you actually confirmed, and say what you did not.
 
+The lessons you author land in THIS project's product automatically (the loader stamps it), so on a shared
+server they stay separate from other products. If a lesson you are about to write is generic enough to
+help a sibling product, it still belongs here first; `/neoize:share` is how it later travels, on purpose.
+
 ## Driving neoize: call the tools, not a shell path
 
 Every neoize operation runs as a **plugin MCP tool**, so drive it by calling the tool, with nothing on
