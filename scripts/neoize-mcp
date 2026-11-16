@@ -24,16 +24,21 @@ CONTROL (mutating): these drive the local graph and the project's .neoize/ files
   - rebuild_structure : regenerate the structural graph from the code (runs .neoize/collect.py).
   - check_lessons     : validate the lessons files offline (no graph).
   - check_graph       : run the project's structural check offline (.neoize/check.py).
-  - share_lessons     : import generic lessons from another product's files into this project.
+  - promote_lessons   : move project lessons up into the universal (shared) layer.
+  - load_shared       : load the universal lessons store into product=shared.
 
 Read-only is enforced on read_neo4j_cypher, because cypher-shell has no read-only flag: a query
 containing a write clause (CREATE, MERGE, DELETE, SET, REMOVE, DROP, FOREACH, LOAD CSV) is refused. The
 control tools are explicitly mutating and the host gates each tool call, so a write still asks.
 
-One shared Neo4j serves every product. Every node carries a `product` discriminant and $product is bound
-on every read to this project's product (resolved from NEOIZE_PRODUCT, .neoize/project.json, or the repo
-name), so a query scopes to the project with {product:$product}; a cross-product read overrides it through
-params. The structural reset and the loaders scope by product too, so products never collide.
+One Neo4j serves every product. Every node carries a `product` discriminant. One id is reserved: `shared`,
+the universal layer that holds for all work with Claude. A session READS the UNION of shared and its own
+product: $products is bound to [shared, <this product>] and a read scopes with `product IN $products`, so
+universal knowledge is always in view and the project's own lessons complement it. $product (singular, this
+project's product, resolved from NEOIZE_PRODUCT, .neoize/project.json, or the repo name) is the single WRITE
+target. A read that names a per-product label (Lesson/Topic/Operation) without scoping by product is refused
+(pass cross_space:true for a deliberate unscoped read). The structural reset and the loaders scope by a
+single product, so products never collide.
 
 Connection from the environment. Under the plugin these variables are injected by .mcp.json from the
 user's configured options (userConfig), so nothing ambient is read; for a direct run they can be set by
@@ -52,7 +57,10 @@ USER = os.environ.get("NEOIZE_NEO4J_USER") or "neo4j"
 PASSWORD = os.environ.get("NEOIZE_NEO4J_PASSWORD") or "neoize-local"
 
 SERVER_NAME = "neoize-neo4j"
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.4.0"
+
+# The reserved product id for the universal layer, read by every session on top of its own product.
+SHARED = "shared"
 DEFAULT_PROTOCOL = "2025-06-18"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))     # the plugin's scripts/ dir
@@ -99,6 +107,14 @@ def _product():
     return os.path.basename(os.path.abspath(proj))
 
 
+def _read_products():
+    """The products a read spans: the shared baseline plus this project's own, so every session sees
+    universal knowledge joined with its project's. Bound as $products and scoped with `product IN
+    $products`. Just [shared] when there is no distinct project product."""
+    cur = _product()
+    return [SHARED] if cur == SHARED else [SHARED, cur]
+
+
 def _container():
     """The container to reach: project.json "container" wins; else neoize-<product> in project mode; else
     the configured/global default. The control tools go through the CLI, which resolves this the same way."""
@@ -112,12 +128,13 @@ def _container():
 
 # --------------------------------------------------------------------------- read tools (cypher-shell)
 def _cypher(query, params=None):
-    """Run one query through the container's cypher-shell. Returns (ok, text). $product is always bound
-    (to this project's product) so a query can scope with {product:$product}; a caller may override it
-    (or add its own params) for a deliberate cross-product read."""
+    """Run one query through the container's cypher-shell. Returns (ok, text). $product (this project's
+    single write product) and $products (the shared+project read union) are always bound, so a query can
+    scope with {product:$product} or `WHERE n.product IN $products`; a caller may override either (or add
+    its own params) for a deliberate cross-space read."""
     cmd = ["docker", "exec", "-i", _container(), "cypher-shell",
            "-u", USER, "-p", PASSWORD, "--format", "plain"]
-    merged = {"product": _product()}
+    merged = {"product": _product(), "products": _read_products()}
     if params:
         merged.update(params)
     for k, v in merged.items():
@@ -135,29 +152,36 @@ def _cypher(query, params=None):
     return True, proc.stdout.strip()
 
 
-# Knowledge-layer labels that are per-product: a query that names one but does not scope by product gets
-# another product's rows too. A gentle, non-blocking nudge, since a cross-product read is sometimes meant.
+# Knowledge-layer labels that are per-product: a query that names one but does not scope by product reads
+# across EVERY product on the server, leaking other products' rows in. The discriminant is mandatory here.
 _SCOPED_LABEL = re.compile(r"\b(Lesson|Topic|Operation)\b")
 
 
-def _scope_note(query):
-    if "product" in query or not _SCOPED_LABEL.search(query):
-        return ""
-    return ("\n\n(note: not scoped by product, so rows may span products. $product is pre-bound to this "
-            "project's product; add {product:$product} to the node pattern to limit it.)")
+def _needs_scope(query):
+    """True when the query names a per-product label but never mentions `product`, so it would read across
+    every product. The standard scope is `WHERE n.product IN $products` (the shared+project union)."""
+    return bool(_SCOPED_LABEL.search(query)) and "product" not in query
 
 
 def tool_read(args):
-    query = (args or {}).get("query", "")
+    args = args or {}
+    query = args.get("query", "")
     if not query.strip():
         return True, "error: empty query."
     if WRITE_CLAUSE.search(query):
         return True, "refused: this server's query tool is read-only and the query contains a write " \
                      "clause. Use a control tool (load_lessons, load_graph, rebuild_structure) for a write."
-    ok, out = _cypher(query, (args or {}).get("params"))
+    if _needs_scope(query) and not args.get("cross_space"):
+        return False, ("refused: this query reads a per-product label (Lesson/Topic/Operation) without "
+                       "scoping by `product`, so it would span every product on the server. Scope it to "
+                       "the shared+project union with `WHERE n.product IN $products` (pre-bound), e.g. "
+                       "MATCH (l:Lesson)-[:ANCHORS_TO]->(t:Topic {id:'x'}) WHERE l.product IN $products "
+                       "AND t.product IN $products. For a deliberate unscoped read across all products, "
+                       "pass cross_space:true.")
+    ok, out = _cypher(query, args.get("params"))
     if not ok:
         return ok, out
-    return ok, (out or "(no rows)") + _scope_note(query)
+    return ok, (out or "(no rows)")
 
 
 def tool_schema(args):
@@ -167,8 +191,8 @@ def tool_schema(args):
          "RETURN labels, rels, collect(propertyKey) AS propertyKeys")
     ok, out = _cypher(q)
     if ok:
-        out += (f"\n\ncurrent product: {_product()}  (every node carries a `product`; scope project nodes "
-                f"with {{product:$product}}, which is pre-bound on every read)")
+        out += (f"\n\nread scope: {_read_products()}  (this session reads the shared+project union; "
+                f"scope reads with `WHERE n.product IN $products`, pre-bound. Writes go to '{_product()}'.)")
     return ok, out
 
 
@@ -234,44 +258,47 @@ def tool_check_graph(args):
     return _cli("check-graph", timeout=120)
 
 
-def tool_share(args):
-    """Import generic lessons from another product's lessons files INTO THIS project, writing
-    .neoize/lessons/shared-from-<from>.json. It is a file copy filtered to generic knowledge: only
-    Topic/Operation-anchored lessons travel, structural anchors are dropped. With list=true, or with
-    neither lessons nor all, it only lists the donor's shareable lessons. The written file is NOT loaded
-    automatically; review it, then load_lessons it."""
+def tool_promote(args):
+    """Move project lessons UP into the universal (shared) layer, so knowledge that holds for all work
+    with Claude is read by every session. A file operation: the chosen lessons leave this project's lessons
+    files and land in ~/.neoize/shared/lessons/from-<product>.json (only Topic/Operation anchors travel).
+    With list=true or no lessons, it lists this project's promotable lessons. Nothing is loaded; follow
+    with load_shared and load_lessons(prune=true)."""
     args = args or {}
-    src = args.get("from")
-    src_dir = args.get("from_dir")
-    if not src:
-        return False, "share needs 'from' (the donor product id)."
-    if not src_dir:
-        return False, "share needs 'from_dir' (path to the donor project, its .neoize, or its lessons dir)."
-    sub = ["share", "--from", src, "--from-dir", src_dir]
-    if args.get("list") or not (args.get("lessons") or args.get("all")):
-        return _cli(*sub, "--list")
-    if args.get("all"):
-        sub.append("--all")
-    else:
-        sub += ["--lessons", ",".join(args["lessons"])]
+    if args.get("list") or not args.get("lessons"):
+        return _cli("promote", "--list")
+    sub = ["promote", "--lessons", ",".join(args["lessons"])]
+    if args.get("copy"):
+        sub.append("--copy")
+    return _cli(*sub)
+
+
+def tool_load_shared(args):
+    """Load the universal lessons store (~/.neoize/shared/lessons) into product=shared in the global
+    server, so every session reads it. Set prune to drop shared lessons absent from the store."""
+    args = args or {}
+    sub = ["shared", "load"] + (["--prune"] if args.get("prune") else [])
     return _cli(*sub)
 
 
 TOOLS = [
     {
         "name": "read_neo4j_cypher",
-        "description": "Run a read-only Cypher query against the local neoize knowledge graph and "
-                       "return the rows as text. Write clauses are refused. One shared graph holds many "
-                       "products and every node carries a `product`; $product is pre-bound to THIS "
-                       "project's product, so scope project nodes with {product:$product} (e.g. "
-                       "MATCH (l:Lesson {product:$product})-[:ANCHORS_TO]->(:Topic {product:$product, "
-                       "id:'x'})). Optional $params are passed as Cypher parameters and may override "
-                       "$product for a deliberate cross-product read.",
+        "description": "Run a read-only Cypher query against the local neoize knowledge graph and return "
+                       "the rows as text. Write clauses are refused. Every node carries a `product`; this "
+                       "session reads the UNION of the universal `shared` layer and its own product, "
+                       "pre-bound as $products. Scope any read of a per-product label with `WHERE "
+                       "n.product IN $products`, e.g. MATCH (l:Lesson)-[:ANCHORS_TO]->(t:Topic {id:'x'}) "
+                       "WHERE l.product IN $products AND t.product IN $products. A query that names "
+                       "Lesson/Topic/Operation without `product` is refused (it would read every product); "
+                       "pass cross_space:true to override for a deliberate all-product read. Optional "
+                       "$params are passed as Cypher parameters.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "The read-only Cypher query."},
-                "params": {"type": "object", "description": "Optional map of Cypher parameters, e.g. {\"topic\": \"getting-started\"}."}
+                "params": {"type": "object", "description": "Optional map of Cypher parameters, e.g. {\"topic\": \"getting-started\"}."},
+                "cross_space": {"type": "boolean", "description": "Allow a per-product-label read that is not scoped by product (reads across all products)."}
             },
             "required": ["query"]
         }
@@ -348,23 +375,32 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}}
     },
     {
-        "name": "share_lessons",
-        "description": "MUTATING (writes a file). Import generic lessons from another product's lessons "
-                       "files INTO THIS project, as .neoize/lessons/shared-from-<from>.json. Only "
-                       "Topic/Operation-anchored lessons travel and their structural anchors are dropped, "
-                       "because a symbol belongs to its own product. With list=true (or neither lessons "
-                       "nor all) it only lists the donor's shareable lessons so you can pick. The file is "
-                       "NOT loaded automatically: review it, then call load_lessons on it.",
+        "name": "promote_lessons",
+        "description": "MUTATING (writes files). Move project lessons UP into the universal (shared) layer, "
+                       "so knowledge that holds for ALL work with Claude is read by every session. The "
+                       "chosen lessons leave this project's lessons files and land in "
+                       "~/.neoize/shared/lessons/from-<product>.json (only Topic/Operation anchors travel; "
+                       "a structural anchor would dangle in shared). With list=true or no lessons it lists "
+                       "this project's promotable lessons. Promote ONLY genuinely universal lessons; when "
+                       "in doubt leave it in the project. Nothing is loaded: follow with load_shared and "
+                       "load_lessons(prune=true).",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "from": {"type": "string", "description": "Donor product id (names the written file)."},
-                "from_dir": {"type": "string", "description": "Path to the donor project, its .neoize, or its lessons dir."},
-                "lessons": {"type": "array", "items": {"type": "string"}, "description": "Lesson ids to import."},
-                "all": {"type": "boolean", "description": "Import every shareable lesson in the donor."},
-                "list": {"type": "boolean", "description": "List the donor's shareable lessons and stop."}
-            },
-            "required": ["from", "from_dir"]
+                "lessons": {"type": "array", "items": {"type": "string"}, "description": "Lesson ids to promote to shared."},
+                "list": {"type": "boolean", "description": "List this project's promotable lessons and stop."},
+                "copy": {"type": "boolean", "description": "Leave the project copy in place (default moves it, to avoid a double in the union read)."}
+            }
+        }
+    },
+    {
+        "name": "load_shared",
+        "description": "MUTATING. Load the universal lessons store (~/.neoize/shared/lessons) into "
+                       "product=shared in the global server, so every session reads it on top of its own "
+                       "product. Set prune to drop shared lessons absent from the store.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"prune": {"type": "boolean", "description": "Delete shared lessons not in the store."}}
         }
     }
 ]
@@ -381,7 +417,8 @@ DISPATCH = {
     "rebuild_structure": tool_rebuild_structure,
     "check_lessons": tool_check_lessons,
     "check_graph": tool_check_graph,
-    "share_lessons": tool_share,
+    "promote_lessons": tool_promote,
+    "load_shared": tool_load_shared,
 }
 
 

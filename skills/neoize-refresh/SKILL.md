@@ -21,7 +21,9 @@ tools wrap, kept as an optional terminal fallback. The map:
 - `load_graph`: load the structural .cypher (`neoize load-graph`).
 - `rebuild_structure`: regenerate the structure from the code (runs `.neoize/collect.py`).
 - `check_lessons` / `check_graph`: the offline validations (`neoize check` / `neoize check-graph`).
-- `read_neo4j_cypher` / `get_neo4j_schema`: query the graph and read its shape.
+- `load_shared`: reload the universal store into product=shared (`neoize shared load`).
+- `read_neo4j_cypher` / `get_neo4j_schema`: query the graph (scope reads with `WHERE n.product IN
+  $products`, the pre-bound shared+project union) and read its shape.
 
 ## Reload the knowledge layer
 
@@ -34,6 +36,10 @@ Authored lessons changed (edited, added, retired, moved between files):
    against the FULL lessons directory, and diff the ids first: dump the graph lesson ids and the file
    lesson ids and confirm the graph-minus-files set is EXACTLY the lesson you meant to remove. If it
    lists anything else, the loaded set is incomplete and prune would delete a real lesson.
+
+This reloads THIS project's space only. If a **shared** (universal) lesson changed, reload that space too
+with `neoize shared load` (add `--prune` to drop shared lessons absent from `~/.neoize/shared/lessons`).
+Each space prunes only its own, so the two never disturb each other.
 
 ## Rebuild the structural layer (if the project has one)
 
@@ -57,8 +63,8 @@ A fixed bug leaves its description behind. A lesson that states a now-fixed mech
 tense goes false the day the fix merges, and nothing errors: it still reads as current and gets cited
 with confidence. So when a fix lands:
 
-1. Pull the lessons that name the ticket or the symbol:
-   `MATCH (l:Lesson) WHERE l.body CONTAINS '<ticket-or-symbol>' RETURN l.id, l.title, l.prov_date`.
+1. Pull the lessons that name the ticket or the symbol, across the union you read:
+   `MATCH (l:Lesson) WHERE l.product IN $products AND l.body CONTAINS '<ticket-or-symbol>' RETURN l.product, l.id, l.title, l.prov_date`.
 2. Read each candidate. The citation alone is only an upper bound, so this is a judgement, not an
    auto-retire. A lesson describing the now-fixed mechanism in the present tense is a reconcile
    candidate: either correct it (author a new lesson carrying `supersedes: ["<old-id>"]`), mark it

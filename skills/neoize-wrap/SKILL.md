@@ -14,9 +14,20 @@ the homes.
 Run this after the work is done and verified. Capturing an unverified claim as a lesson launders a guess
 into the record, so only write down what you actually confirmed, and say what you did not.
 
-The lessons you author land in THIS project's product automatically (the loader stamps it), so on a shared
-server they stay separate from other products. If a lesson you are about to write is generic enough to
-help a sibling product, it still belongs here first; `/neoize:share` is how it later travels, on purpose.
+A lesson has one more routing axis than its theme: which **space** it belongs to. Two spaces exist; a
+lesson lives in exactly one.
+
+- **shared** - knowledge that holds for ALL work with Claude on this machine, independent of any one
+  codebase: how you run git, the PR flow, verification discipline, how articles are written, how agents
+  are orchestrated. It is read by every session on top of its own project, so it is the baseline. Its home
+  is the universal store under `neoize shared dir`, at `~/.neoize/shared/lessons`, loaded into product=shared.
+- **project** - anything that names this product's code, tools, domain or infra. Its home is
+  `.neoize/lessons/`, loaded into this project's product.
+
+The bar for shared is HIGH: a wrong shared lesson pollutes every future session, so when a fact is even
+slightly tied to this product, keep it in the project. Default to project. A lesson already in the project
+that turns out to be universal is moved up with `promote` (the `/neoize:promote` skill), never copied, so
+it never lives in both and shows up twice in the union read.
 
 ## Driving neoize: call the tools, not a shell path
 
@@ -29,7 +40,11 @@ tools wrap, kept as an optional terminal fallback. The map:
 - `load_graph`: load the structural .cypher (`neoize load-graph`).
 - `rebuild_structure`: regenerate the structure from the code (runs `.neoize/collect.py`).
 - `check_lessons` / `check_graph`: the offline validations (`neoize check` / `neoize check-graph`).
-- `read_neo4j_cypher` / `get_neo4j_schema`: query the graph and read its shape.
+- `load_shared`: load the universal store into product=shared (`neoize shared load`).
+- `promote_lessons`: move a project lesson up into the shared space (`neoize promote`).
+- `read_neo4j_cypher` / `get_neo4j_schema`: query the graph and read its shape. A read scopes to the
+  shared+project union with `WHERE n.product IN $products` (pre-bound); the tool refuses a
+  Lesson/Topic/Operation read that is not scoped.
 
 ## Step 1 - read the project's routing config
 
@@ -46,33 +61,40 @@ List the candidate facts from this session before writing any of them. Route eac
   rules file named in `wrap.md`. This is NOT a lesson. It must be loaded every session, so it belongs in
   the instructions, not behind an on-demand query.
 - **A situational gotcha or technical note anchored to specific code** (a symbol, a subsystem, a file, a
-  domain entity) -> a **Lesson** in `.neoize/lessons/`, anchored to that node (or a Topic). This is the
-  graph's job: it surfaces only when you touch what it concerns.
+  domain entity) -> a **project Lesson** in `.neoize/lessons/`, anchored to that node (or a Topic). This is
+  the graph's job: it surfaces only when you touch what it concerns. Always project (it names your code).
+- **A universal practice** (holds for every codebase: git discipline, PR flow, verification, writing voice,
+  agent orchestration) -> a **shared Lesson** in `~/.neoize/shared/lessons`, anchored to a Topic or an
+  Operation. This is the baseline every session reads. Hold a high bar; when in doubt, file it as project.
 - **A trap at a decision point** (bites when you push, release, migrate, close a ticket) -> a **Lesson
   anchored to an Operation**, plus a row in `.neoize/triggers.json` so the hook surfaces it when that
-  operation fires.
+  operation fires. Decide its space the same way: a universal push rule is shared, a rule about THIS
+  product's release is project.
 - **History** (what shipped, when, in which PR) -> the changelog named in `wrap.md`. Not the graph.
 - **Session state** (what to pick up next, what is still unverified, open threads) -> agent memory.
 
-Report the routing (fact -> home) before writing. A fact you cannot place is one to raise with the user,
-not to file twice.
+Report the routing (fact -> home; for a lesson, its space: shared or project) before writing. A fact you
+cannot place is one to raise with the user, not to file twice.
 
 ## Step 3 - author the new lessons
 
-For each fact routed to the graph, write it into `.neoize/lessons/<theme>.json` per
+For each fact routed to the graph, write it into its space's store: a project lesson into
+`.neoize/lessons/<theme>.json`, a universal one into `$(neoize shared dir)/lessons/<theme>.json`, which is
+`~/.neoize/shared/lessons/<theme>.json`. Both follow
 `${CLAUDE_PLUGIN_ROOT}/templates/lesson.schema.json`: a stable `id`, the one-line `title`, a `body` that
 carries the trap, the mechanism and the fix (plus the worked example and date if there is one), the
 `kind`/`scope`/`confidence`/`status`, at least one `anchor`, and `provenance.date` as an absolute date.
 Set `confidence: measured` only for a fact you demonstrated with a control; otherwise `observed` or
-`inferred`, honestly. Validate as you go with `neoize check .neoize/lessons`.
+`inferred`, honestly. Validate as you go with `neoize check .neoize/lessons` (and
+`neoize check "$(neoize shared dir)/lessons"` if you wrote a shared one).
 
 ## Step 4 - reconcile what went stale
 
 A fix made this session may have falsified an existing lesson. A lesson stating a now-fixed mechanism in
 the present tense reads as current and gets cited, so reconcile it rather than leaving it:
 
-- Pull candidates that name what you changed:
-  `MATCH (l:Lesson) WHERE l.body CONTAINS '<ticket-or-symbol>' RETURN l.id, l.title, l.prov_date`.
+- Pull candidates that name what you changed (scoped to the union you read):
+  `MATCH (l:Lesson) WHERE l.product IN $products AND l.body CONTAINS '<ticket-or-symbol>' RETURN l.product, l.id, l.title, l.prov_date`.
 - Read each (the citation is only an upper bound, this is a judgement). Correct it with a new lesson
   carrying `supersedes: ["<old-id>"]`, mark it `status: historical` if it is worth keeping as a
   postmortem, or `status: retired` to tombstone it. A lesson citing the change as the ORIGIN of current
@@ -83,8 +105,12 @@ reconciled).
 
 ## Step 5 - load and prove
 
-- `neoize load-lessons .neoize/lessons`, and read the resolved-anchor denominator. An anchor that did
-  not resolve is reported by name: fix the id, never leave a lesson anchored to nothing.
+- Load each space you wrote to. Project lessons: `neoize load-lessons .neoize/lessons` (`load_lessons`).
+  Shared lessons: `neoize shared load` (`load_shared`). Read the resolved-anchor denominator from each. An
+  anchor that did not resolve is reported by name: fix the id, never leave a lesson anchored to nothing.
+  Each load prunes only its own space, so loading one never disturbs the other.
+- If you promoted an existing project lesson up to shared this session, run both loaders with the prune
+  option so the moved lesson leaves the project space and lands in shared, in one pass.
 - If the code's STRUCTURE changed this session, rebuild it too: `python3 .neoize/collect.py` then
   `neoize load-graph .neoize/graph.cypher`, and re-run `neoize load-lessons` after (a structural reload
   drops the lesson-to-structure anchors). This is the `neoize-refresh` routine; defer to it for the
