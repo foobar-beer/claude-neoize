@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/foobar-beer/claude-neoize/graph.schema.json",
   "title": "claude-neoize structural graph",
-  "description": "The output shape a project collector (.neoize/collect.py) writes to .neoize/graph.json. It is a projection of the code, regenerated and never hand-edited. The sibling .neoize/graph.cypher is the MERGE form loaded into Neo4j; keep both in sync.",
+  "description": "The output shape a project collector (.neoize/collect.py) writes to .neoize/graph.json. It is a projection of the code, regenerated and never hand-edited. The sibling .neoize/graph.cypher is the MERGE form loaded into Neo4j; keep both in sync. ONE shared Neo4j serves many products, so graph.json stays product-agnostic (ids are local to the product); graph.cypher must carry the product discriminant in EVERY node key: MERGE on `{product:$product, id:...}`, never `{id:...}` alone, with the loader binding $product to this project's product. A key without product would merge two products' same-id nodes into one and would survive the product-scoped structural reset as an orphan, so `neoize load-graph` refuses a .cypher that does not mention `product`.",
   "type": "object",
   "required": ["nodes", "edges"],
   "properties": {

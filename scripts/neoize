@@ -1,43 +1,53 @@
 #!/usr/bin/env python3
 """
-neoize - bring up the local knowledge graph, load lessons into it, and query it.
+neoize - bring up the shared knowledge graph, load lessons into it and query it.
 
 The graph has two layers. The STRUCTURAL/SYMBOL layer is produced by a per-project collector (the
 `neoize-init` skill proposes one for your codebase, because what counts as structure is yours, not
 generic). The KNOWLEDGE layer is authored lessons in .neoize/lessons/*.json, loaded on top, and is
 fully generic. This CLI owns the database lifecycle and the generic knowledge layer.
 
-  neoize up                 # start the local Neo4j (docker compose, loopback only)
+Every node carries a `product` discriminant, in BOTH server modes, so a graph always knows which product
+it belongs to. The mode is a lifecycle choice made at init and stored in .neoize/project.json:
+  global  (default) - ONE shared Neo4j for the whole machine, at ~/.neoize/ (override NEOIZE_HOME),
+                      container neoize-neo4j. Many products live in it, kept apart by the discriminant.
+  project           - this project runs its own Neo4j (container neoize-<product>, its own volume and
+                      ports, compose in .neoize/). Physically separate, still product-stamped, so it can
+                      be merged or shared into the global server later.
+A project declares its product in .neoize/project.json (default: the git repo name; set with
+`neoize product --set`). All reads, the structural reset and the loaders scope by that product, so one
+product never sees or overwrites another; `neoize share` copies generic lessons between projects.
+
+  neoize up                 # start the ONE shared Neo4j (docker compose, loopback only)
   neoize down               # stop it (keeps the volume; `down --wipe` drops it too)
-  neoize status             # is it up, and what does it hold (node counts by label)
-  neoize load-lessons ...   # load authored lessons (delegates to scripts/load-lessons)
-  neoize load-graph <file>  # load a project collector's .cypher, resetting only the structural layer
+  neoize status             # is it up, this product's node counts and the roster of products on it
+  neoize load-lessons ...   # load authored lessons for this product (delegates to scripts/load-lessons)
+  neoize load-graph <file>  # load this product's collector .cypher, resetting only its structural layer
   neoize check [path]       # validate lessons files locally: schema, duplicate ids, dangling supersedes
   neoize check-graph        # run the project's structural check (.neoize/check.py), if it has one
-  neoize query "<cypher>"   # run one Cypher query against the running graph
+  neoize query "<cypher>"   # run one Cypher query ($product is bound to this project's product)
+  neoize product [--set ID] # print (or set) the product and mode this project resolves to
+  neoize share --from P --from-dir DIR --lessons x,y  # import generic lessons from product P into here
 
 Connection from the environment, with local defaults matching the shipped docker-compose:
   NEOIZE_NEO4J_CONTAINER (neoize-neo4j), NEOIZE_NEO4J_USER (neo4j), NEOIZE_NEO4J_PASSWORD (neoize-local)
-Under the plugin the MCP server receives these from the user's configured options (userConfig); this
-CLI reads whatever is in the environment, so set them yourself for a direct terminal run.
-The compose file used by `up`/`down` is .neoize/docker-compose.neo4j.yml in your project if present,
-otherwise the bundled template.
+  NEOIZE_PRODUCT overrides the resolved product; NEOIZE_HOME overrides where the shared server lives.
+Under the plugin the MCP server receives the connection from the user's configured options (userConfig);
+this CLI reads whatever is in the environment, so set it yourself for a direct terminal run. The compose
+used by `up`/`down` is ~/.neoize/docker-compose.neo4j.yml (materialised from the bundled template on first
+`up`); a legacy .neoize/docker-compose.neo4j.yml in the project is still honoured if present.
 """
 import argparse
 import glob
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PLUGIN_ROOT = os.path.dirname(_HERE)          # scripts/ -> plugin root
-
-
-def _env():
-    return (os.environ.get("NEOIZE_NEO4J_CONTAINER") or "neoize-neo4j",
-            os.environ.get("NEOIZE_NEO4J_USER") or "neo4j",
-            os.environ.get("NEOIZE_NEO4J_PASSWORD") or "neoize-local")
 
 
 def _project_dir():
@@ -48,11 +58,92 @@ def _neoize_dir():
     return os.path.join(_project_dir(), ".neoize")
 
 
+def _project_json():
+    try:
+        return json.load(open(os.path.join(_neoize_dir(), "project.json"), encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _mode():
+    """Server lifecycle mode, chosen at init and stored in project.json. 'global' (the default) shares ONE
+    server across every product on this machine; 'project' gives this project its own container and volume.
+    It is a lifecycle choice only: every node carries the `product` discriminant either way, so a
+    per-project graph stays compatible with the shared one and can be merged or shared into it later."""
+    return (_project_json().get("mode") or "global").lower()
+
+
+def _container():
+    """The container to connect to (every tool reaches the graph with `docker exec <container>`). An
+    explicit project.json "container" wins; else in project mode it is neoize-<product> (the project owns
+    its server); else the configured/global default."""
+    pj = _project_json()
+    if pj.get("container"):
+        return pj["container"]
+    if _mode() == "project":
+        return f"neoize-{_product()}"
+    return os.environ.get("NEOIZE_NEO4J_CONTAINER") or "neoize-neo4j"
+
+
+def _env():
+    return (_container(),
+            os.environ.get("NEOIZE_NEO4J_USER") or "neo4j",
+            os.environ.get("NEOIZE_NEO4J_PASSWORD") or "neoize-local")
+
+
+def _shared_dir():
+    """Where the ONE shared Neo4j server lives, decoupled from any project. A single container serves
+    every product; a project contributes only its authored data (lessons, collector, product id), never
+    its own database. Override with NEOIZE_HOME."""
+    return os.environ.get("NEOIZE_HOME") or os.path.join(os.path.expanduser("~"), ".neoize")
+
+
+def _product():
+    """The product this project's nodes belong to: the discriminant every graph node carries so one
+    server holds many products without them colliding. Resolved, in order: NEOIZE_PRODUCT (explicit,
+    for CI or a cross-product run), .neoize/project.json's "product", the git repo name, the dir name.
+    A product may span several repos, so it is declared in project.json rather than inferred per repo."""
+    env = os.environ.get("NEOIZE_PRODUCT")
+    if env:
+        return env
+    p = _project_json().get("product")
+    if p:
+        return p
+    proj = _project_dir()
+    try:
+        top = subprocess.run(["git", "-C", proj, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, check=False).stdout.strip()
+        if top:
+            return os.path.basename(top)
+    except Exception:
+        pass
+    return os.path.basename(os.path.abspath(proj))
+
+
 def _compose_file():
-    local = os.path.join(_neoize_dir(), "docker-compose.neo4j.yml")
-    if os.path.isfile(local):
-        return local
+    """Which compose `up`/`down` drive. In project mode it is the project's own .neoize compose (init
+    scaffolds it with a product-specific container, volume and ports). In global mode it is the shared
+    ~/.neoize compose. In either mode a missing file falls back to the bundled template, which the caller
+    guards against for project mode (the template is the global container and would collide)."""
+    if _mode() == "project":
+        local = os.path.join(_neoize_dir(), "docker-compose.neo4j.yml")
+        if os.path.isfile(local):
+            return local
+        return os.path.join(_PLUGIN_ROOT, "templates", "docker-compose.neo4j.yml")
+    shared = os.path.join(_shared_dir(), "docker-compose.neo4j.yml")
+    if os.path.isfile(shared):
+        return shared
     return os.path.join(_PLUGIN_ROOT, "templates", "docker-compose.neo4j.yml")
+
+
+def _ensure_shared_compose():
+    """Materialise the shared compose under ~/.neoize on first use, so `up` targets one project-independent
+    server. Returns its path."""
+    dst = os.path.join(_shared_dir(), "docker-compose.neo4j.yml")
+    if not os.path.isfile(dst):
+        os.makedirs(_shared_dir(), exist_ok=True)
+        shutil.copyfile(os.path.join(_PLUGIN_ROOT, "templates", "docker-compose.neo4j.yml"), dst)
+    return dst
 
 
 def _container_running(container):
@@ -65,20 +156,48 @@ def _container_running(container):
     return container in out.stdout.split()
 
 
-def _cypher(script):
+def _cypher(script, params=None):
     container, user, pw = _env()
-    return subprocess.run(["docker", "exec", "-i", container, "cypher-shell",
-                           "-u", user, "-p", pw, "--format", "plain"],
-                          input=script, text=True, capture_output=True, check=False)
+    cmd = ["docker", "exec", "-i", container, "cypher-shell", "-u", user, "-p", pw, "--format", "plain"]
+    for k, v in (params or {}).items():
+        # "name => <cypher literal>"; a JSON-encoded scalar or list is a valid literal.
+        cmd += ["--param", f"{k} => {json.dumps(v, ensure_ascii=False)}"]
+    return subprocess.run(cmd, input=script, text=True, capture_output=True, check=False)
 
 
 # ----------------------------------------------------------------------------- lifecycle
+def _published_ports(compose):
+    """The host ports the compose publishes for the Browser (7474) and Bolt (7687), so `up` can print the
+    right URL in project mode where init assigns unique ports. Defaults to the standard pair."""
+    http, bolt = "7474", "7687"
+    try:
+        for line in open(compose, encoding="utf-8"):
+            m = re.search(r"(\d+):7474", line)
+            if m:
+                http = m.group(1)
+            m = re.search(r"(\d+):7687", line)
+            if m:
+                bolt = m.group(1)
+    except Exception:
+        pass
+    return http, bolt
+
+
 def cmd_up(args):
-    compose = _compose_file()
-    print(f"Starting Neo4j from {compose} ...")
+    if _mode() == "project":
+        compose = os.path.join(_neoize_dir(), "docker-compose.neo4j.yml")
+        if not os.path.isfile(compose):
+            print("project mode but no .neoize/docker-compose.neo4j.yml exists. Run /neoize:init to "
+                  "scaffold this project's own server, or switch to global mode.", file=sys.stderr)
+            return 1
+        print(f"Starting the per-project Neo4j from {compose} ...")
+    else:
+        compose = _ensure_shared_compose()
+        print(f"Starting the shared Neo4j from {compose} ...")
     rc = subprocess.run(["docker", "compose", "-f", compose, "up", "-d"], check=False).returncode
     if rc == 0:
-        print("Up. Browser: http://localhost:7474   Bolt: bolt://127.0.0.1:7687")
+        http, bolt = _published_ports(compose)
+        print(f"Up. Browser: http://localhost:{http}   Bolt: bolt://127.0.0.1:{bolt}")
     return rc
 
 
@@ -98,12 +217,21 @@ def cmd_status(args):
     if not _container_running(container):
         print(f"Neo4j container '{container}' is NOT running. Start it with: neoize up")
         return 1
-    proc = _cypher("MATCH (n) RETURN labels(n)[0] AS label, count(*) AS n ORDER BY n DESC")
+    product = _product()
+    proc = _cypher("MATCH (n {product:$product}) RETURN labels(n)[0] AS label, count(*) AS n ORDER BY n DESC",
+                   {"product": product})
     if proc.returncode != 0:
         sys.stderr.write(proc.stdout + proc.stderr)
         return proc.returncode
-    print(f"Neo4j '{container}' is up. Node counts by label:")
-    print(proc.stdout.rstrip() or "  (empty graph)")
+    print(f"Neo4j '{container}' is up ({_mode()} mode). Product '{product}' node counts by label:")
+    print(proc.stdout.rstrip() or "  (nothing for this product yet)")
+    # One shared server holds many products; show the roster so it is obvious what else lives here.
+    other = _cypher("MATCH (n) WHERE n.product IS NOT NULL "
+                    "RETURN n.product AS product, count(*) AS n ORDER BY product")
+    rows = [r for r in other.stdout.strip().splitlines()[1:] if r.strip()]
+    if rows:
+        print(f"\nProducts on this server ({len(rows)}):")
+        print(other.stdout.rstrip())
     return 0
 
 
@@ -112,7 +240,8 @@ def cmd_query(args):
     if not _container_running(container):
         print(f"Neo4j container '{container}' is not running. Start it with: neoize up", file=sys.stderr)
         return 1
-    proc = _cypher(args.cypher)
+    # $product is bound to this project's product so a terminal query can scope with {product:$product}.
+    proc = _cypher(args.cypher, {"product": _product()})
     sys.stdout.write(proc.stdout)
     sys.stderr.write(proc.stderr)
     return proc.returncode
@@ -122,8 +251,11 @@ def cmd_query(args):
 def cmd_load_lessons(args):
     loader = os.path.join(_HERE, "load-lessons")
     targets = args.paths or [os.path.join(_neoize_dir(), "lessons")]
+    # Pin the product explicitly so the loader stamps the same discriminant the CLI resolved, even if the
+    # subprocess sees a different cwd.
+    env = dict(os.environ, NEOIZE_PRODUCT=_product())
     return subprocess.run([sys.executable, loader, *(["--prune"] if args.prune else []), *targets],
-                          check=False).returncode
+                          check=False, env=env).returncode
 
 
 def cmd_load_graph(args):
@@ -131,7 +263,13 @@ def cmd_load_graph(args):
     The knowledge layer (Lesson, Topic, Operation) and any symbol layer (Symbol, File) are preserved,
     because they are authored or expensive to rebuild. Structural nodes are deleted and rebuilt, so the
     lesson-to-structural anchors drop with them: re-run `neoize load-lessons` immediately after, which
-    the command reminds you to do."""
+    the command reminds you to do.
+
+    The reset and the collector's MERGEs are BOTH scoped to this project's product ($product), so one
+    shared server holds many products and rebuilding one never touches another's structure. The
+    collector must emit product into its node keys (`{product:$product, id:...}`); a .cypher that does
+    not is refused here, because loading it would create product-less nodes the reset can never reclaim
+    and would merge two products' same-id nodes into one."""
     container, _, _ = _env()
     if not _container_running(container):
         print(f"Neo4j container '{container}' is not running. Start it with: neoize up", file=sys.stderr)
@@ -139,15 +277,22 @@ def cmd_load_graph(args):
     if not os.path.isfile(args.file):
         print(f"{args.file} not found.", file=sys.stderr)
         return 1
+    product = _product()
     cypher = open(args.file, encoding="utf-8").read()
-    reset = ("MATCH (n) WHERE NOT (n:Lesson OR n:Topic OR n:Operation OR n:Symbol OR n:File) "
+    if "product" not in cypher:
+        print(f"{args.file} does not mention `product`, so it predates the shared-server model. Update the "
+              f"collector to emit `{{product:$product, id:...}}` in every MERGE key, regenerate it and "
+              f"load again. See the migration note in the README.", file=sys.stderr)
+        return 1
+    reset = ("MATCH (n {product:$product}) WHERE NOT (n:Lesson OR n:Topic OR n:Operation OR n:Symbol OR n:File) "
              "DETACH DELETE n;\n")
-    proc = _cypher(reset + cypher)
+    proc = _cypher(reset + cypher, {"product": product})
     sys.stdout.write(proc.stdout)
     sys.stderr.write(proc.stderr)
     if proc.returncode != 0:
         return proc.returncode
-    print(f"Loaded {args.file}. Structural projection reset; Lesson/Topic/Operation preserved.")
+    print(f"Loaded {args.file} for product '{product}'. Structural projection reset; "
+          f"Lesson/Topic/Operation preserved; other products untouched.")
     print("Re-run `neoize load-lessons` now, so lesson anchors to structural nodes resolve again.")
     return 0
 
@@ -216,6 +361,127 @@ def cmd_check(args):
     return 1
 
 
+# ----------------------------------------------------------------------------- product / sharing
+def cmd_product(args):
+    """Print the product and mode this project resolves to; --set / --mode write them into
+    .neoize/project.json so they are stable and can span repos."""
+    if args.set or args.mode:
+        if args.mode and args.mode not in ("global", "project"):
+            print("mode must be 'global' or 'project'.", file=sys.stderr)
+            return 1
+        nd = _neoize_dir()
+        os.makedirs(nd, exist_ok=True)
+        path = os.path.join(nd, "project.json")
+        try:
+            data = json.load(open(path, encoding="utf-8"))
+        except Exception:
+            data = {}
+        if args.set:
+            data["product"] = args.set
+        if args.mode:
+            data["mode"] = args.mode
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        print(f"Wrote {path}: product='{data.get('product', _product())}', mode='{data.get('mode', 'global')}'")
+        return 0
+    print(f"{_product()}  ({_mode()} mode)")
+    return 0
+
+
+def _resolve_lessons_dir(p):
+    """From a path that may be a lessons dir, a .neoize dir or a repo root, find the lessons/*.json dir.
+    A `lessons` subdirectory is preferred over the path itself, so pointing at a .neoize dir (which also
+    holds project.json and triggers.json) still resolves to its lessons/, not to those files."""
+    for cand in (os.path.join(p, "lessons"), os.path.join(p, ".neoize", "lessons"), p):
+        if os.path.isdir(cand) and glob.glob(os.path.join(cand, "*.json")):
+            return cand
+    return None
+
+
+def _read_lessons(ldir):
+    out = []
+    for f in sorted(glob.glob(os.path.join(ldir, "*.json"))):
+        try:
+            out += json.load(open(f, encoding="utf-8")).get("lessons", [])
+        except Exception as exc:
+            print(f"  ! skipped unreadable {f}: {exc}", file=sys.stderr)
+    return out
+
+
+def _is_shareable(l):
+    """Generic enough to travel: not retired and anchored to at least one Topic or Operation. A lesson
+    that only anchors to a structural/symbol node is about one product's own code and does not travel."""
+    return l.get("status") != "retired" and any(
+        a.get("type") in ("Topic", "Operation") for a in l.get("anchors", []))
+
+
+def cmd_share(args):
+    """Pull generic lessons from another product's lessons files into THIS project, as a new, durable,
+    version-controlled lessons file. Sharing is a file copy (the lessons files are the source of truth,
+    the graph is a projection), filtered to generic knowledge: each lesson keeps only its Topic/Operation
+    anchors; a structural/symbol anchor is dropped because that node belongs to the source product.
+    A lesson that is purely about the source's own code never appears as a candidate at all. The written
+    file is a STARTING POINT to review and adapt, not loaded automatically."""
+    src = args.src
+    if not args.from_dir:
+        print("share needs --from-dir <path to the source project, its .neoize, or its lessons dir>.",
+              file=sys.stderr)
+        return 1
+    ldir = _resolve_lessons_dir(args.from_dir)
+    if not ldir:
+        print(f"no lessons/*.json found under {args.from_dir}.", file=sys.stderr)
+        return 1
+    cands = [l for l in _read_lessons(ldir) if _is_shareable(l)]
+    if args.list or not (args.lessons or args.all):
+        print(f"Shareable lessons in '{src}' ({ldir}) - {len(cands)}:")
+        for l in cands:
+            print(f"  {l['id']}  - {l.get('title', '')}")
+        if not (args.lessons or args.all):
+            print(f"\nImport with: neoize share --from {src} --from-dir {args.from_dir} "
+                  f"--lessons <id,id,...>  (or --all)")
+        return 0
+    if args.all:
+        chosen = cands
+    else:
+        want = {s.strip() for s in (args.lessons or "").split(",") if s.strip()}
+        by_id = {l["id"]: l for l in cands}
+        missing = want - set(by_id)
+        if missing:
+            print(f"not shareable or not found in '{src}': {', '.join(sorted(missing))}", file=sys.stderr)
+            return 1
+        chosen = [by_id[i] for i in want]
+    if not chosen:
+        print("nothing to share.", file=sys.stderr)
+        return 1
+    # keep each lesson valid per the schema, but drop structural anchors (they are the source's own nodes)
+    shared = []
+    for l in chosen:
+        c = dict(l)
+        c["anchors"] = [a for a in l.get("anchors", []) if a.get("type") in ("Topic", "Operation")]
+        shared.append(c)
+    # warn on id collisions with THIS project's own lessons, so a later load does not silently overwrite
+    my_dir = os.path.join(_neoize_dir(), "lessons")
+    mine = {l["id"] for l in _read_lessons(my_dir)} if os.path.isdir(my_dir) else set()
+    collide = sorted({l["id"] for l in shared} & mine)
+    os.makedirs(my_dir, exist_ok=True)
+    out_path = os.path.join(my_dir, f"shared-from-{src}.json")
+    doc = {"_source": f"Lessons shared from product '{src}'. Review and adapt each to this product before "
+                      f"relying on it; the content was true for '{src}', not necessarily here.",
+           "lessons": shared}
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    print(f"Wrote {len(shared)} lesson(s) from '{src}' to {out_path}.")
+    print("Structural/symbol anchors were dropped; only Topic/Operation anchors travel.")
+    if collide:
+        print(f"  ! these ids already exist in this project and a load would OVERWRITE them: "
+              f"{', '.join(collide)}. Rename them in the shared file first if that is not what you want.",
+              file=sys.stderr)
+    print(f"Review it, then load it:  neoize load-lessons {out_path}")
+    return 0
+
+
 # ----------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description="Bring up, load and query the local knowledge graph.")
@@ -247,6 +513,20 @@ def main():
     q = sub.add_parser("query", help="run one Cypher query")
     q.add_argument("cypher", help="the Cypher query")
     q.set_defaults(func=cmd_query)
+
+    pr = sub.add_parser("product", help="print or set the product and mode this project resolves to")
+    pr.add_argument("--set", metavar="ID", help="write this product id into .neoize/project.json")
+    pr.add_argument("--mode", choices=["global", "project"], help="write the server mode into .neoize/project.json")
+    pr.set_defaults(func=cmd_product)
+
+    sh = sub.add_parser("share", help="import generic lessons from another product into this project")
+    sh.add_argument("--from", dest="src", required=True, help="source product id (used to name the file)")
+    sh.add_argument("--from-dir", dest="from_dir",
+                    help="path to the source project, its .neoize, or its lessons dir")
+    sh.add_argument("--lessons", help="comma-separated lesson ids to import")
+    sh.add_argument("--all", action="store_true", help="import every shareable lesson in the source")
+    sh.add_argument("--list", action="store_true", help="list the shareable lessons in the source and stop")
+    sh.set_defaults(func=cmd_share)
 
     args = ap.parse_args()
     if not getattr(args, "func", None):

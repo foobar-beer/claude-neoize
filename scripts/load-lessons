@@ -30,6 +30,11 @@ anchor is VALIDATED against the graph before loading: an anchor naming a node th
 reported and skipped, never fabricated (a lesson that silently anchors to nothing is worse than no
 lesson). Topic and Operation nodes are the authored anchor kinds and are created on demand.
 
+Every node is stamped with the project's `product` (NEOIZE_PRODUCT, else .neoize/project.json, else the
+repo name), so one shared server holds many products and the same lesson or topic id in two products
+stays two nodes. Keys and anchors all scope by {product:$product}; --prune only ever removes THIS
+product's lessons.
+
 Loads via `docker exec ... cypher-shell` (no python driver needed). Connection from the environment,
 with dev defaults: NEOIZE_NEO4J_CONTAINER (neoize-neo4j), NEOIZE_NEO4J_USER (neo4j),
 NEOIZE_NEO4J_PASSWORD (neoize-local). Under the plugin these are injected from the user's configured
@@ -41,15 +46,60 @@ import os
 import subprocess
 import sys
 
-ENV = (os.environ.get("NEOIZE_NEO4J_CONTAINER") or "neoize-neo4j",
+def _project_json():
+    proj = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    try:
+        return json.load(open(os.path.join(proj, ".neoize", "project.json"), encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _product():
+    """The product these lessons belong to: the discriminant stamped on every node so one server holds
+    many products without colliding. NEOIZE_PRODUCT, then .neoize/project.json, then the repo name, then
+    the dir name. The CLI pins NEOIZE_PRODUCT when it invokes this loader."""
+    env = os.environ.get("NEOIZE_PRODUCT")
+    if env:
+        return env
+    p = _project_json().get("product")
+    if p:
+        return p
+    proj = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    try:
+        top = subprocess.run(["git", "-C", proj, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, check=False).stdout.strip()
+        if top:
+            return os.path.basename(top)
+    except Exception:
+        pass
+    return os.path.basename(os.path.abspath(proj))
+
+
+PRODUCT = _product()
+
+
+def _container():
+    """The container to reach. project.json "container" wins; else neoize-<product> in project mode; else
+    the configured/global default. Matches the CLI so the loader and the lifecycle agree."""
+    pj = _project_json()
+    if pj.get("container"):
+        return pj["container"]
+    if (pj.get("mode") or "global").lower() == "project":
+        return f"neoize-{PRODUCT}"
+    return os.environ.get("NEOIZE_NEO4J_CONTAINER") or "neoize-neo4j"
+
+
+ENV = (_container(),
        os.environ.get("NEOIZE_NEO4J_USER") or "neo4j",
        os.environ.get("NEOIZE_NEO4J_PASSWORD") or "neoize-local")
 
 
 def cy(query):
     c, u, p = ENV
+    # $product is bound for every statement, so keys and matches scope to this product with {product:$product}.
     proc = subprocess.run(["docker", "exec", "-i", c, "cypher-shell", "-u", u, "-p", p,
-                           "--format", "plain"], input=query, text=True, capture_output=True)
+                           "--format", "plain", "--param", f"product => {json.dumps(PRODUCT)}"],
+                          input=query, text=True, capture_output=True)
     if proc.returncode != 0:
         sys.stderr.write(proc.stdout + proc.stderr)
         raise SystemExit(f"cypher-shell failed (exit {proc.returncode})")
@@ -57,8 +107,8 @@ def cy(query):
 
 
 def existing_ids(label):
-    """The set of id values of every node with this label, from ONE query."""
-    out = cy(f"MATCH (n:{label}) WHERE n.id IS NOT NULL RETURN n.id AS id")
+    """The set of id values of every node with this label IN THIS PRODUCT, from ONE query."""
+    out = cy(f"MATCH (n:{label} {{product:$product}}) WHERE n.id IS NOT NULL RETURN n.id AS id")
     ids = set()
     for line in out.strip().splitlines():
         v = line.strip().strip('"')
@@ -142,24 +192,29 @@ def main():
             else:
                 sup_missed.append((l["id"], sid))
 
+    # Every node key carries product:$product, so a Lesson, Topic or Operation id is unique PER PRODUCT
+    # and the same id in two products stays two nodes. A structural anchor matches the node the collector
+    # stamped with this product. Nothing here can touch another product's nodes.
     stmts = []
     for l in retired:
-        stmts.append(f'MATCH (l:Lesson {{id:{lit(l["id"])}}}) DETACH DELETE l;')
+        stmts.append(f'MATCH (l:Lesson {{product:$product, id:{lit(l["id"])}}}) DETACH DELETE l;')
     for l in live:
         props = {k: l[k] for k in ("title", "body", "kind", "scope", "confidence", "status")}
         props.update(prov_props(l))
         body = ", ".join(f"{k}: {lit(v)}" for k, v in sorted(props.items()))
-        stmts.append(f'MERGE (l:Lesson {{id:{lit(l["id"])}}}) SET l += {{{body}}};')
+        stmts.append(f'MERGE (l:Lesson {{product:$product, id:{lit(l["id"])}}}) SET l += {{{body}}};')
     for l in live:
         for a in l["anchors"]:
             if a["type"] in AUTHORED_ANCHORS:
-                stmts.append(f'MERGE (x:{a["type"]} {{id:{lit(a["id"])}}});')
+                stmts.append(f'MERGE (x:{a["type"]} {{product:$product, id:{lit(a["id"])}}});')
             elif (l["id"], a["type"], a["id"]) in missed_set:
                 continue   # do not anchor to a node that does not exist
-            stmts.append(f'MATCH (l:Lesson {{id:{lit(l["id"])}}}),(x:{a["type"]} {{id:{lit(a["id"])}}}) '
+            stmts.append(f'MATCH (l:Lesson {{product:$product, id:{lit(l["id"])}}}),'
+                         f'(x:{a["type"]} {{product:$product, id:{lit(a["id"])}}}) '
                          f'MERGE (l)-[:ANCHORS_TO]->(x);')
     for lid, sid in sup_edges:
-        stmts.append(f'MATCH (l:Lesson {{id:{lit(lid)}}}),(old:Lesson {{id:{lit(sid)}}}) '
+        stmts.append(f'MATCH (l:Lesson {{product:$product, id:{lit(lid)}}}),'
+                     f'(old:Lesson {{product:$product, id:{lit(sid)}}}) '
                      f'MERGE (l)-[:SUPERSEDES]->(old);')
     if stmts:
         cy("\n".join(stmts))
@@ -168,8 +223,10 @@ def main():
     if prune:
         pruned = sorted(existing_ids("Lesson") - batch_ids)
         if pruned:
-            cy("\n".join(f'MATCH (l:Lesson {{id:{lit(i)}}}) DETACH DELETE l;' for i in pruned))
+            cy("\n".join(f'MATCH (l:Lesson {{product:$product, id:{lit(i)}}}) DETACH DELETE l;'
+                         for i in pruned))
 
+    print(f"Product        : {PRODUCT}")
     print(f"Files          : {len(files)}")
     print(f"Lessons loaded : {len(live)}")
     if retired:

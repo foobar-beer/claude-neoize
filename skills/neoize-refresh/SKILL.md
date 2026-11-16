@@ -40,11 +40,16 @@ Authored lessons changed (edited, added, retired, moved between files):
 The code's structure changed (a new module, a renamed entity, a changed dependency):
 
 1. Re-run the project collector: `python3 .neoize/collect.py` writes a fresh `.neoize/graph.json` and
-   `.neoize/graph.cypher`. Diff `graph.json` against the committed one and sanity-check the delta.
-2. Load the structure. This resets the structural projection, so the lesson-to-structural anchors are
-   dropped and must be restored: re-run `neoize load-lessons .neoize/lessons` immediately after, and
-   confirm the resolved-anchor count comes back to where it was. A structural reload that is not
-   followed by a lesson reload leaves the graph under-anchored and nothing errors, so do not skip it.
+   `.neoize/graph.cypher`. Diff `graph.json` against the committed one and sanity-check the delta. The
+   `graph.cypher` must key every node on `{product:$product, id:...}`; `neoize load-graph` refuses one
+   that does not, because a product-less node would orphan and could collide with another product. If an
+   old collector still emits `{id:...}` alone, fix its emit (add `product:$product` to every MERGE key)
+   before loading.
+2. Load the structure. This resets only THIS product's structural projection (never another product's),
+   so the lesson-to-structural anchors are dropped and must be restored: re-run
+   `neoize load-lessons .neoize/lessons` immediately after, then confirm the resolved-anchor count comes
+   back to where it was. A structural reload that is not followed by a lesson reload leaves the graph
+   under-anchored and nothing errors, so do not skip it.
 
 ## Reconcile a stale lesson when closing a ticket
 

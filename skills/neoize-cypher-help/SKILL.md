@@ -25,18 +25,24 @@ tools wrap, kept as an optional terminal fallback. The map:
 - `check_lessons` / `check_graph`: the offline validations (`neoize check` / `neoize check-graph`).
 - `read_neo4j_cypher` / `get_neo4j_schema`: query the graph and read its shape.
 
-## Step 1 - confirm the graph is up and read its model
+## Step 1 - confirm the graph is up, note the product, read its model
 
 Run `neoize status` (or a query through the MCP server). If it is down, tell the user to `neoize up`
-first and stop. Then read the actual model:
+first and stop. `status` also prints the **product** this project resolves to: note it, because one
+server holds many products and every query must scope to this one by `{product:'<product>'}`. Read the
+model for THIS product only:
 
-- labels and their counts: `MATCH (n) RETURN labels(n)[0] AS label, count(*) AS n ORDER BY n DESC`
+- labels and their counts: `MATCH (n {product:'<product>'}) RETURN labels(n)[0] AS label, count(*) AS n ORDER BY n DESC`
 - relationship types: `CALL db.relationshipTypes()`
 - property keys: `CALL db.propertyKeys()`
 
-Do NOT invent examples for a label or relationship that is not in this list. If the graph has only the
+Do NOT invent examples for a label or relationship that is not in this list. If the product has only the
 knowledge layer (Lesson/Topic/Operation) and no structural layer yet, say so and show only the knowledge
 queries.
+
+Emit the cheat-sheet with the product value written IN, not as `$product`: the Neo4j Browser does not bind
+it, so `{product:'<theproduct>'}` makes each query run as pasted. Tell the user once that every query is
+scoped to their product this way.
 
 ## Step 2 - pick real sample values
 
@@ -49,19 +55,22 @@ the busiest structural label. Use those actual values in the examples rather tha
 Print copy-paste blocks, each with a one-line "what it answers" above it. Group them. Only include a
 group whose nodes/edges exist.
 
+Every example scopes to the product, writing the value in. Use `P` below for the real product id.
+
 **Knowledge layer (always, if any Lesson exists):**
 - every Topic and how many lessons it carries (the map of what the graph knows)
-- all lessons on one topic (use a real topic id): `MATCH (l:Lesson)-[:ANCHORS_TO]->(:Topic {id:'<real>'}) RETURN l.title, l.body`
+- all lessons on one topic (use a real topic id): `MATCH (l:Lesson {product:'P'})-[:ANCHORS_TO]->(:Topic {product:'P', id:'<real>'}) RETURN l.title, l.body`
 - all lessons for one operation (use a real op id)
-- lessons that mention a term the user cares about: `MATCH (l:Lesson) WHERE l.body CONTAINS '<term>' RETURN l.title, l.body`
+- lessons that mention a term the user cares about: `MATCH (l:Lesson {product:'P'}) WHERE l.body CONTAINS '<term>' RETURN l.title, l.body`
 - the oldest lessons (reconcile candidates): order by `prov_date`
 
 **Structural layer (only for the labels/edges that exist):** for each relationship type present, show one
 traversal in plain terms, for example "which <From> is linked to which <To>":
-`MATCH (a:<FromLabel>)-[:<REL>]->(b:<ToLabel>) RETURN a.id, b.id`. If a transitive dependency-style edge
-exists (a self-referential edge on one label, e.g. DEPENDS_ON), show a blast-radius walk:
-`MATCH (x {id:'<real>'})<-[:<REL>*]-(d) RETURN DISTINCT d.id`. If the structural nodes carry lessons,
-show how to pull the lessons for a node: `MATCH (l:Lesson)-[:ANCHORS_TO]->({id:'<real>'}) RETURN l.title, l.body`.
+`MATCH (a:<FromLabel> {product:'P'})-[:<REL>]->(b:<ToLabel> {product:'P'}) RETURN a.id, b.id`. If a
+transitive dependency-style edge exists (a self-referential edge on one label, e.g. DEPENDS_ON), show a
+blast-radius walk: `MATCH (x {product:'P', id:'<real>'})<-[:<REL>*]-(d {product:'P'}) RETURN DISTINCT d.id`.
+If the structural nodes carry lessons, show how to pull the lessons for a node:
+`MATCH (l:Lesson {product:'P'})-[:ANCHORS_TO]->({product:'P', id:'<real>'}) RETURN l.title, l.body`.
 
 **Schema overview (always):** the whole-graph shape, for orientation:
 `CALL db.schema.visualization()` and the label-count query from Step 1.
