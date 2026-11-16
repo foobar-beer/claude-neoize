@@ -40,18 +40,23 @@ That is what lets one Neo4j hold more than one product at once without their nod
 other. A product can span several repos: give each repo's `.neoize/project.json` the same product id and
 they feed one graph. The id defaults to the repo name; `neoize product --set` changes it.
 
+One product id is reserved: **`shared`**, the universal layer. It holds the knowledge that is true for all
+your work with Claude, independent of any one codebase: how you run git, how a PR is opened, verification
+discipline, the voice your writing uses. It lives in the global server, so in **global mode** a session
+**reads the union** of `shared` and its own product, with universal wisdom always in view and a project's
+own lessons complementing it. A session **writes** to a single product; a lesson that turns out to be
+universal is promoted up to `shared` with `/neoize:promote`, where every other project then reads it.
+Structure and symbols are never shared, because they are one codebase's own.
+
 Because the discriminant is in the data, you choose at setup how the server is run. It is only a
 lifecycle choice:
 
 - **global** (the default) runs one shared Neo4j for the whole machine, at `~/.neoize/`. Every product you
-  set up lives in it, kept apart by the discriminant. This is the mode to pick when one person works
-  across several products and may want to carry a lesson from one to another.
-- **project** gives a project its own Neo4j, its own container and volume and ports. Pick it when a graph
-  must stay self-contained. It is still product-stamped, so it stays compatible with the shared server and
-  can be merged or shared into it later.
-
-Either way, `/neoize:share` moves the generic half of one product's knowledge into another on purpose: a
-lesson about a topic or an operation travels, a lesson about one product's own code does not.
+  set up lives in it alongside the `shared` layer, kept apart by the discriminant, so a session reads the
+  shared+project union. This is the mode to pick for a shared baseline of wisdom across your products.
+- **project** gives a project its own Neo4j, its own container and volume and ports. The graph is
+  self-contained: it holds only that one product, with no shared layer. Pick it when a graph must stay
+  isolated (a client repo you keep apart). It is still product-stamped, so its data stays compatible.
 
 ## Install
 
@@ -99,8 +104,8 @@ In the project you want a graph for:
 ```
 
 `init` sets up `.neoize/` in your repo (you version-control it), has you confirm the product id and the
-server mode, starts Neo4j and walks you through proposing the structural schema for your codebase. If you
-already run neoize for another product, `init` can seed this one from its lessons. `migrate` reads the
+server mode, starts Neo4j and walks you through proposing the structural schema for your codebase. The new
+project reads the machine's `shared` layer from the start, so it does not begin empty. `migrate` reads the
 prose knowledge you already have, sorts it into lessons anchored to topics and operations, loads it, and
 replaces each migrated block with a one-line pointer so the same fact never lives in two places.
 
@@ -131,13 +136,15 @@ add one, is a rebuildable artifact and stays out of git.
 The bundled MCP server (`scripts/neoize-mcp`) is the control surface. A Claude or MCP session drives the
 whole graph by calling tools, with nothing on PATH and no script for the human to run:
 
-- `read_neo4j_cypher`, `get_neo4j_schema`: query the graph and read its shape (read-only). `$product` is
-  pre-bound to this project's product, so a query scopes to it with `{product:$product}`.
+- `read_neo4j_cypher`, `get_neo4j_schema`: query the graph and read its shape (read-only). `$products`, the
+  shared+project read union, is pre-bound, so a read scopes with `WHERE n.product IN $products`. A read of a
+  Lesson/Topic/Operation that is not scoped by product is refused (pass `cross_space` to override).
 - `graph_status`, `graph_up`, `graph_down`: report on, start, or stop the graph.
 - `load_lessons`, `load_graph`, `rebuild_structure`: load the lessons, load the structure, or regenerate
   the structure from the code.
 - `check_lessons`, `check_graph`: the offline validations.
-- `share_lessons`: import another product's generic lessons into this project.
+- `promote_lessons`: move a project lesson up into the universal `shared` layer.
+- `load_shared`: load the universal lessons store into product=shared.
 
 The query tool is read-only (a write clause is refused). The control tools are explicitly mutating, and
 the host gates each tool call, so a write still asks.
@@ -149,13 +156,14 @@ the host gates each tool call, so a write still asks.
 ```
 neoize up                 # start the Neo4j (shared ~/.neoize in global mode, the project's own in project mode)
 neoize down [--wipe]      # stop it; --wipe also drops the data volume
-neoize status             # is it up, this product's node counts and the roster of products on the server
+neoize status             # is it up, the shared+project counts this session reads and the roster
 neoize load-lessons [p]   # load authored lessons (default .neoize/lessons); --prune drops removed ones
 neoize load-graph <file>  # load the collector's .cypher, resetting only this product's structural layer
+neoize shared load        # load the universal store (~/.neoize/shared/lessons) into product=shared
 neoize check [path]       # validate lessons files locally, before they touch the graph
-neoize query "<cypher>"   # run one Cypher query ($product is bound to this project's product)
+neoize query "<cypher>"   # run one Cypher query ($product and $products are bound for scoping)
 neoize product [--set ID] [--mode global|project]   # print or set the product and mode
-neoize share --from P --from-dir DIR [--list | --lessons a,b | --all]   # import product P's generic lessons
+neoize promote --lessons a,b,c   # move project lessons up into the shared (universal) layer
 ```
 
 For a terminal run outside Claude Code the connection comes from the environment, with local defaults
@@ -197,8 +205,14 @@ comes from the collector). Per project:
 4. Rebuild clean. In project mode: `neoize down --wipe`, `neoize up`, then `neoize load-graph` and
    `neoize load-lessons`. In global mode: `neoize up` (the shared server), then the same two loads; once
    `neoize status` shows the product, retire the old per-project container and its volume.
+5. Separate the universal half. Knowledge that holds for every project (git discipline, PR flow,
+   verification, writing voice) belongs in the `shared` layer, not in a product: `neoize promote --lessons
+   <ids>` moves those lessons into `~/.neoize/shared/lessons`, then `neoize shared load` loads them as
+   product=shared. Every project then reads them on top of its own. Hold a high bar; when in doubt, leave a
+   lesson in its project.
 
-`neoize status` then shows the product stamped on every count and the roster of products on the server.
+`neoize status` then shows the shared+project union this session reads and the roster of products on the
+server.
 
 ## What is generic and what you bring
 
@@ -215,11 +229,11 @@ can scope it as a follow-up if you want it.
 ```
 .claude-plugin/plugin.json        plugin manifest
 .claude-plugin/marketplace.json   marketplace entry
-skills/neoize-init/               set up a project (product id, mode, schema, optional seed)
+skills/neoize-init/               set up a project (product id, mode, schema)
 skills/neoize-migrate/            move existing notes into lessons
 skills/neoize-refresh/            keep the graph current
 skills/neoize-wrap/               end-of-session capture: route what was learned to its one home
-skills/neoize-share/              import another product's generic lessons into this project
+skills/neoize-promote/            move a project lesson up into the shared (universal) layer
 skills/neoize-cypher-help/        print example Cypher tailored to this graph, for the Neo4j Browser
 hooks/hooks.json                  PreToolUse registration
 hooks/graph-operation-reminder.py the operation reminder (triggers are data, in your .neoize/)

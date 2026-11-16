@@ -16,7 +16,12 @@ as a second home for the same fact.
 
 `neoize-init` already set this project's product. Every lesson the loader writes is stamped with it
 automatically, so you never put a product into a lesson; these migrated lessons land only in this
-product's graph even when the server is shared with others.
+product's graph even when the server is shared with others. Most of a project's own docs are exactly that:
+project knowledge. But a doc you are migrating may hold a UNIVERSAL rule (how you run git, how a PR is
+opened, the writing voice) that is true for every project. Route that one to the **shared** layer, not
+here: author it under `~/.neoize/shared/lessons` (or migrate it into the project and `/neoize:promote` it
+up). The bar for shared is high, so when a rule is even slightly tied to this product, keep it in the
+project.
 
 ## Driving neoize: call the tools, not a shell path
 

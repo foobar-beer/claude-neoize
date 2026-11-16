@@ -13,15 +13,24 @@ codebase's own domain, so you PROPOSE a collector for it and let the user approv
 universal extractor and do not guess the domain.
 
 Every node the graph holds carries a **`product`** discriminant, so one Neo4j can hold more than one
-product without them colliding. That is true in both server modes; the mode is only a lifecycle choice:
+product without them colliding. One product id is reserved: **`shared`**, the universal layer of knowledge
+that holds for all work with Claude (git discipline, PR flow, verification, writing voice). It lives in the
+global server, so in global mode every session READS the union of `shared` and its own product. Once this
+project is set up it automatically sees the machine's shared wisdom on top of its own. This project
+WRITES to its own product; a lesson that turns out to be universal is promoted up to `shared` with
+`/neoize:promote`. A project-mode graph is self-contained and has no shared layer (see the modes below).
+
+The discriminant is carried in both server modes; the mode is only a lifecycle choice:
 
 - **global** (the default): ONE shared Neo4j for the whole machine, at `~/.neoize/`, container
-  `neoize-neo4j`. Every product this user sets up lives in it, kept apart by the discriminant. Best when
-  one person works across several products on one machine and may want to share lessons between them.
+  `neoize-neo4j`. Every product this user sets up lives in it alongside the `shared` layer, kept apart by
+  the discriminant, so a session reads the shared+project union. Best when one person works across several
+  products on one machine with a shared baseline of wisdom.
 - **project**: this project runs its OWN Neo4j (container `neoize-<product>`, its own volume and ports,
-  compose in `.neoize/`). Physically separate. Pick it when the graph must stay self-contained (a client
-  repo you keep apart, a machine where products must not mingle). It is still product-stamped, so it can
-  be merged or shared into the shared server later.
+  compose in `.neoize/`). Physically separate and self-contained: it holds only this product, with NO
+  shared layer. Pick it when the graph must stay isolated (a client repo you keep apart, a machine where
+  products must not mingle). It is still product-stamped, so its data stays compatible with the shared
+  server if it is ever consolidated there.
 
 Work in steps. Confirm with the user at the marked decision points. Keep everything you create inside
 `.neoize/` in the project, which the user version-controls.
@@ -37,8 +46,10 @@ tools wrap, kept as an optional terminal fallback. The map:
 - `load_graph`: load the structural .cypher (`neoize load-graph`).
 - `rebuild_structure`: regenerate the structure from the code (runs `.neoize/collect.py`).
 - `check_lessons` / `check_graph`: the offline validations (`neoize check` / `neoize check-graph`).
-- `read_neo4j_cypher` / `get_neo4j_schema`: query the graph and read its shape.
-- `share_lessons`: import generic lessons from another product (used in the optional seed step below).
+- `read_neo4j_cypher` / `get_neo4j_schema`: query the graph (scope with `WHERE n.product IN $products`,
+  the pre-bound shared+project union) and read its shape.
+- `load_shared`: load the universal lessons store into product=shared (`neoize shared load`).
+- `promote_lessons`: move a project lesson up into the shared layer (used in the contribute step below).
 
 ## Step 1 - check the prerequisites
 
@@ -120,8 +131,9 @@ than moving on.
 
 Then confirm Claude can reach the graph through the MCP server. The plugin ships a read-only Neo4j MCP
 server; its tools are named `mcp__plugin_neoize_neo4j__*`. Run one query through it (for example count
-this product's Topic nodes with `MATCH (t:Topic {product:$product}) RETURN count(t)`; `$product` is
-pre-bound) and confirm the count matches what `neoize status` showed. If the MCP tools are not present,
+the Topic nodes in view with `MATCH (t:Topic) WHERE t.product IN $products RETURN count(t)`; `$products`,
+the shared+project union, is pre-bound; a read of a Lesson/Topic/Operation that is not scoped by
+product is refused) and confirm the count matches what `neoize status` showed. If the MCP tools are not present,
 the plugin was installed in a session that has not restarted since; tell the user to restart Claude Code,
 because a fresh MCP registration needs it.
 
@@ -174,34 +186,32 @@ them:
   skip it otherwise. `neoize load-graph` already preserves Symbol and File nodes across a structural
   reload, so the symbol layer survives a `collect.py` rebuild.
 
-## Step 8 - (optional) seed from another product's knowledge
+## Step 8 - the shared layer (global mode)
 
-If the user already runs neoize for another product, this new one can start with the generic wisdom that
-product learned, instead of an empty graph. Offer it only when there is a plausible donor (ask, or infer
-from `neoize status` showing other products on a shared server). It is a pull of lessons, never of code:
-only Topic/Operation-anchored lessons travel; a lesson about the donor's own structure never does.
+In global mode every session reads the universal `shared` layer on top of its own product, so once the
+machine has accumulated shared wisdom (git discipline, PR flow, verification, writing voice), a new project
+sees it from the first session without importing anything. Check what is there with `neoize shared status`.
+On a fresh machine the shared layer is empty, which is the normal starting point; it fills as universal
+lessons are promoted. If it already has lessons, confirm they are in view: a read of a shared Topic or
+Operation returns rows under `product = 'shared'` from this project's context.
 
-1. List the donor's shareable lessons: `share_lessons` with `from: "<donor>"`, `list: true` (or
-   `neoize share --from <donor> --from-dir <donor repo>/.neoize --list`). Pull a few bodies so the user
-   judges relevance, because a lesson can be generic in form but specific in content (the donor's auth
-   provider is not this product's).
-2. Let the user PICK. Import the chosen ones: `share_lessons` with `from`, `to` omitted (the target is
-   this project) and `lessons: [...]`, which writes `.neoize/lessons/shared-from-<donor>.json`. It drops
-   every structural anchor and warns on any id that collides with a lesson this project already has.
-3. `neoize check` the new file, then `neoize load-lessons` it. Tell the user these are a STARTING POINT
-   to review and adapt to this product, marked by the file they live in, not finished lessons.
+Nothing to import, by design. When this project learns something universal, it is promoted UP into shared
+with `/neoize:promote`, so every other project gains it too. Mention that to the user. Do not copy another
+product's lessons in; reading the shared layer is how wisdom is reused. (In project mode there is no shared
+layer, so this step does not apply.)
 
 ## Step 9 - wire the "graph first" reflex
 
 Offer to add a short section to the project's `CLAUDE.md` (or create one) that tells Claude to query the
 graph before grepping for a project fact, names the MCP tools, and lists the three retrieval shapes (by
-topic, by operation, by structural node). Say that `$product` is pre-bound on every read, so a query
-scopes to this project with `{product:$product}`. Show the user the exact text before writing it. This is
-what makes the graph the first source instead of a database nobody queries.
+topic, by operation, by structural node). Say that the session reads the shared+project union, pre-bound as
+`$products`, so a read scopes with `WHERE n.product IN $products` (and an unscoped Lesson/Topic/Operation
+read is refused). Show the user the exact text before writing it. This is what makes the graph the first
+source instead of a database nobody queries.
 
 ## Finish
 
 Report, in one message: the product id and mode you set, what you created, the node counts now in this
-product's graph, the one query you proved the MCP path with, anything seeded from another product and the
+product's graph, the one query you proved the MCP path with, whether the shared layer is in view and the
 exact next step (run `/neoize:migrate` to move existing docs into lessons). Name anything you did not do,
 for example a deferred symbol layer, rather than rounding it up to done.

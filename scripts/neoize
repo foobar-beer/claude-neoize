@@ -8,26 +8,35 @@ generic). The KNOWLEDGE layer is authored lessons in .neoize/lessons/*.json, loa
 fully generic. This CLI owns the database lifecycle and the generic knowledge layer.
 
 Every node carries a `product` discriminant, in BOTH server modes, so a graph always knows which product
-it belongs to. The mode is a lifecycle choice made at init and stored in .neoize/project.json:
+it belongs to. One product id is reserved: `shared`. It is the universal layer, the knowledge that holds
+for everything done with Claude on this machine (git discipline, PR flow, verification, writing voice).
+It lives in the GLOBAL server, so in global mode a session READS the UNION of `shared` and its own product
+(reads bind $products = [shared, <this product>] and scope with `product IN $products`), with universal
+knowledge always in view and the project's own lessons complementing it. A session WRITES to a single
+product: structure and project lessons go to the project, universal lessons are promoted to `shared`. The
+mode is a lifecycle choice made at init and stored in .neoize/project.json:
   global  (default) - ONE shared Neo4j for the whole machine, at ~/.neoize/ (override NEOIZE_HOME),
-                      container neoize-neo4j. Many products live in it, kept apart by the discriminant.
+                      container neoize-neo4j. shared and every project live in it, kept apart by product,
+                      so a session reads the shared+project union. This is the mode for a shared baseline.
   project           - this project runs its own Neo4j (container neoize-<product>, its own volume and
-                      ports, compose in .neoize/). Physically separate, still product-stamped, so it can
-                      be merged or shared into the global server later.
+                      ports, compose in .neoize/). Physically separate and SELF-CONTAINED: it holds only
+                      this product, with no shared layer, for a graph that must stay isolated.
 A project declares its product in .neoize/project.json (default: the git repo name; set with
-`neoize product --set`). All reads, the structural reset and the loaders scope by that product, so one
-product never sees or overwrites another; `neoize share` copies generic lessons between projects.
+`neoize product --set`). The structural reset and the loaders scope by a single product, so one product
+never overwrites another; reads span the shared+project union; `neoize promote` moves a project lesson up
+into the shared layer.
 
   neoize up                 # start the ONE shared Neo4j (docker compose, loopback only)
   neoize down               # stop it (keeps the volume; `down --wipe` drops it too)
-  neoize status             # is it up, this product's node counts and the roster of products on it
+  neoize status             # is it up, the shared+project counts this session reads and the roster
   neoize load-lessons ...   # load authored lessons for this product (delegates to scripts/load-lessons)
   neoize load-graph <file>  # load this product's collector .cypher, resetting only its structural layer
+  neoize shared load        # load the universal lessons store (~/.neoize/shared/lessons) into `shared`
   neoize check [path]       # validate lessons files locally: schema, duplicate ids, dangling supersedes
   neoize check-graph        # run the project's structural check (.neoize/check.py), if it has one
-  neoize query "<cypher>"   # run one Cypher query ($product is bound to this project's product)
+  neoize query "<cypher>"   # run one Cypher query ($product and $products are bound for scoping)
   neoize product [--set ID] # print (or set) the product and mode this project resolves to
-  neoize share --from P --from-dir DIR --lessons x,y  # import generic lessons from product P into here
+  neoize promote --lessons x,y  # move project lessons up into the shared layer (~/.neoize/shared)
 
 Connection from the environment, with local defaults matching the shipped docker-compose:
   NEOIZE_NEO4J_CONTAINER (neoize-neo4j), NEOIZE_NEO4J_USER (neo4j), NEOIZE_NEO4J_PASSWORD (neoize-local)
@@ -48,6 +57,10 @@ import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PLUGIN_ROOT = os.path.dirname(_HERE)          # scripts/ -> plugin root
+
+# The reserved product id for the universal layer: knowledge that holds for all work with Claude on this
+# machine, read by every session on top of its own product. Never a project's own product id.
+SHARED = "shared"
 
 
 def _project_dir():
@@ -96,6 +109,25 @@ def _shared_dir():
     every product; a project contributes only its authored data (lessons, collector, product id), never
     its own database. Override with NEOIZE_HOME."""
     return os.environ.get("NEOIZE_HOME") or os.path.join(os.path.expanduser("~"), ".neoize")
+
+
+def _shared_store():
+    """The universal lessons store, decoupled from any project: the authored home of the `shared` product.
+    Lessons here are loaded into product=shared and read by every session. Version-control it so the
+    universal wisdom has a history."""
+    return os.path.join(_shared_dir(), "shared")
+
+
+def _shared_lessons_dir():
+    return os.path.join(_shared_store(), "lessons")
+
+
+def _read_products():
+    """The products a read spans: the shared baseline joined with this project's own, so a session always
+    sees universal knowledge and its project's lessons together. Bound as $products on every read and
+    scoped with `product IN $products`. Just [shared] when there is no distinct project product."""
+    cur = _product()
+    return [SHARED] if cur == SHARED else [SHARED, cur]
 
 
 def _product():
@@ -159,7 +191,12 @@ def _container_running(container):
 def _cypher(script, params=None):
     container, user, pw = _env()
     cmd = ["docker", "exec", "-i", container, "cypher-shell", "-u", user, "-p", pw, "--format", "plain"]
-    for k, v in (params or {}).items():
+    # $product (this project's single write/primary product) and $products (the shared+project read union)
+    # are bound on every call so a query can scope with {product:$product} or `product IN $products` without
+    # the caller passing them; an explicit param overrides either.
+    merged = {"product": _product(), "products": _read_products()}
+    merged.update(params or {})
+    for k, v in merged.items():
         # "name => <cypher literal>"; a JSON-encoded scalar or list is a valid literal.
         cmd += ["--param", f"{k} => {json.dumps(v, ensure_ascii=False)}"]
     return subprocess.run(cmd, input=script, text=True, capture_output=True, check=False)
@@ -218,19 +255,24 @@ def cmd_status(args):
         print(f"Neo4j container '{container}' is NOT running. Start it with: neoize up")
         return 1
     product = _product()
-    proc = _cypher("MATCH (n {product:$product}) RETURN labels(n)[0] AS label, count(*) AS n ORDER BY n DESC",
-                   {"product": product})
+    products = _read_products()
+    print(f"Neo4j '{container}' is up ({_mode()} mode).")
+    print(f"This session reads the union {products} (writes go to '{product}').")
+    # Node counts for the union this session actually reads: the project's own plus the shared baseline.
+    proc = _cypher("MATCH (n) WHERE n.product IN $products "
+                   "RETURN n.product AS product, labels(n)[0] AS label, count(*) AS n "
+                   "ORDER BY product, n DESC")
     if proc.returncode != 0:
         sys.stderr.write(proc.stdout + proc.stderr)
         return proc.returncode
-    print(f"Neo4j '{container}' is up ({_mode()} mode). Product '{product}' node counts by label:")
-    print(proc.stdout.rstrip() or "  (nothing for this product yet)")
-    # One shared server holds many products; show the roster so it is obvious what else lives here.
+    print("\nIn-scope node counts (product, label, n):")
+    print(proc.stdout.rstrip() or "  (nothing in scope yet)")
+    # One server holds every product; show the full roster so it is obvious what else lives here.
     other = _cypher("MATCH (n) WHERE n.product IS NOT NULL "
                     "RETURN n.product AS product, count(*) AS n ORDER BY product")
     rows = [r for r in other.stdout.strip().splitlines()[1:] if r.strip()]
     if rows:
-        print(f"\nProducts on this server ({len(rows)}):")
+        print(f"\nAll products on this server ({len(rows)}):")
         print(other.stdout.rstrip())
     return 0
 
@@ -240,8 +282,9 @@ def cmd_query(args):
     if not _container_running(container):
         print(f"Neo4j container '{container}' is not running. Start it with: neoize up", file=sys.stderr)
         return 1
-    # $product is bound to this project's product so a terminal query can scope with {product:$product}.
-    proc = _cypher(args.cypher, {"product": _product()})
+    # $product (this product) and $products (the shared+project read union) are bound, so a terminal query
+    # can scope with {product:$product} or `WHERE n.product IN $products`.
+    proc = _cypher(args.cypher)
     sys.stdout.write(proc.stdout)
     sys.stderr.write(proc.stderr)
     return proc.returncode
@@ -409,77 +452,155 @@ def _read_lessons(ldir):
     return out
 
 
-def _is_shareable(l):
-    """Generic enough to travel: not retired and anchored to at least one Topic or Operation. A lesson
-    that only anchors to a structural/symbol node is about one product's own code and does not travel."""
+def _is_promotable(l):
+    """Shaped to belong in the shared layer: not retired and anchored to at least one Topic or Operation.
+    A lesson that only anchors to a structural/symbol node is about one product's own code and cannot be
+    universal, so it is never a promotion candidate. Shape is necessary, not sufficient: whether the
+    CONTENT is truly universal is a human call."""
     return l.get("status") != "retired" and any(
         a.get("type") in ("Topic", "Operation") for a in l.get("anchors", []))
 
 
-def cmd_share(args):
-    """Pull generic lessons from another product's lessons files into THIS project, as a new, durable,
-    version-controlled lessons file. Sharing is a file copy (the lessons files are the source of truth,
-    the graph is a projection), filtered to generic knowledge: each lesson keeps only its Topic/Operation
-    anchors; a structural/symbol anchor is dropped because that node belongs to the source product.
-    A lesson that is purely about the source's own code never appears as a candidate at all. The written
-    file is a STARTING POINT to review and adapt, not loaded automatically."""
-    src = args.src
-    if not args.from_dir:
-        print("share needs --from-dir <path to the source project, its .neoize, or its lessons dir>.",
-              file=sys.stderr)
+def _lesson_file_index(ldir):
+    """Map lesson id -> (file path, the lesson object), across every *.json in a lessons dir."""
+    index = {}
+    for f in sorted(glob.glob(os.path.join(ldir, "*.json"))):
+        try:
+            doc = json.load(open(f, encoding="utf-8"))
+        except Exception as exc:
+            print(f"  ! skipped unreadable {f}: {exc}", file=sys.stderr)
+            continue
+        for l in doc.get("lessons", []):
+            if l.get("id"):
+                index[l["id"]] = (f, l)
+    return index
+
+
+def _rewrite_without(path, drop_ids):
+    """Remove the given lesson ids from a lessons file, keeping its other keys, then write it back."""
+    doc = json.load(open(path, encoding="utf-8"))
+    doc["lessons"] = [l for l in doc.get("lessons", []) if l.get("id") not in drop_ids]
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+
+
+def cmd_promote(args):
+    """Move project lessons UP into the shared layer, so knowledge that holds for all work with Claude
+    stops being one project's secret and is read by every session. It is a file operation (the lessons
+    files are the source of truth, the graph is a projection): the chosen lessons leave this project's
+    lessons files and land in ~/.neoize/shared/lessons/from-<product>.json, keeping only their
+    Topic/Operation anchors (a structural anchor would dangle in shared, which has no code). Nothing is
+    loaded; run `neoize shared load` and re-run this project's `neoize load-lessons` afterwards. The move
+    is reversible through git in both the project and the shared store. Pass --copy to leave the project
+    copy in place, but then it lives in two products and the union read shows it twice, so move is the
+    default."""
+    product = _product()
+    if product == SHARED:
+        print("already on the shared product; nothing to promote into.", file=sys.stderr)
         return 1
-    ldir = _resolve_lessons_dir(args.from_dir)
-    if not ldir:
-        print(f"no lessons/*.json found under {args.from_dir}.", file=sys.stderr)
-        return 1
-    cands = [l for l in _read_lessons(ldir) if _is_shareable(l)]
-    if args.list or not (args.lessons or args.all):
-        print(f"Shareable lessons in '{src}' ({ldir}) - {len(cands)}:")
-        for l in cands:
-            print(f"  {l['id']}  - {l.get('title', '')}")
-        if not (args.lessons or args.all):
-            print(f"\nImport with: neoize share --from {src} --from-dir {args.from_dir} "
-                  f"--lessons <id,id,...>  (or --all)")
+    my_dir = os.path.join(_neoize_dir(), "lessons")
+    index = _lesson_file_index(my_dir) if os.path.isdir(my_dir) else {}
+    cands = {i: (f, l) for i, (f, l) in index.items() if _is_promotable(l)}
+    if args.list or not args.lessons:
+        print(f"Promotable lessons in '{product}' ({my_dir}) - {len(cands)} of {len(index)}:")
+        for i, (_, l) in sorted(cands.items()):
+            print(f"  {i}  - {l.get('title', '')}")
+        if not args.lessons:
+            print("\nPromote with: neoize promote --lessons <id,id,...>   (only genuinely universal ones)")
         return 0
-    if args.all:
-        chosen = cands
-    else:
-        want = {s.strip() for s in (args.lessons or "").split(",") if s.strip()}
-        by_id = {l["id"]: l for l in cands}
-        missing = want - set(by_id)
-        if missing:
-            print(f"not shareable or not found in '{src}': {', '.join(sorted(missing))}", file=sys.stderr)
-            return 1
-        chosen = [by_id[i] for i in want]
-    if not chosen:
-        print("nothing to share.", file=sys.stderr)
+    want = [s.strip() for s in args.lessons.split(",") if s.strip()]
+    missing = [i for i in want if i not in index]
+    if missing:
+        print(f"not found in '{product}': {', '.join(missing)}", file=sys.stderr)
         return 1
-    # keep each lesson valid per the schema, but drop structural anchors (they are the source's own nodes)
-    shared = []
-    for l in chosen:
+    not_shaped = [i for i in want if i not in cands]
+    if not_shaped:
+        print(f"not promotable (no Topic/Operation anchor, so they cannot be universal): "
+              f"{', '.join(not_shaped)}", file=sys.stderr)
+        return 1
+
+    sdir = _shared_lessons_dir()
+    os.makedirs(sdir, exist_ok=True)
+    out_path = os.path.join(sdir, f"from-{product}.json")
+    existing = []
+    if os.path.isfile(out_path):
+        existing = json.load(open(out_path, encoding="utf-8")).get("lessons", [])
+    have = {l.get("id") for l in existing}
+    moved, skipped = [], []
+    for i in want:
+        if i in have:
+            skipped.append(i)
+            continue
+        _, l = index[i]
         c = dict(l)
         c["anchors"] = [a for a in l.get("anchors", []) if a.get("type") in ("Topic", "Operation")]
-        shared.append(c)
-    # warn on id collisions with THIS project's own lessons, so a later load does not silently overwrite
-    my_dir = os.path.join(_neoize_dir(), "lessons")
-    mine = {l["id"] for l in _read_lessons(my_dir)} if os.path.isdir(my_dir) else set()
-    collide = sorted({l["id"] for l in shared} & mine)
-    os.makedirs(my_dir, exist_ok=True)
-    out_path = os.path.join(my_dir, f"shared-from-{src}.json")
-    doc = {"_source": f"Lessons shared from product '{src}'. Review and adapt each to this product before "
-                      f"relying on it; the content was true for '{src}', not necessarily here.",
-           "lessons": shared}
+        existing.append(c)
+        moved.append(i)
+    doc = {"_source": f"Universal lessons promoted from product(s) into the shared layer. Read by every "
+                      f"session on top of its own product.",
+           "lessons": existing}
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
-    print(f"Wrote {len(shared)} lesson(s) from '{src}' to {out_path}.")
+    if not args.copy and moved:
+        # remove the promoted lessons from their project files, grouped per file
+        per_file = {}
+        for i in moved:
+            per_file.setdefault(index[i][0], set()).add(i)
+        for f, ids in per_file.items():
+            _rewrite_without(f, ids)
+
+    print(f"Promoted {len(moved)} lesson(s) from '{product}' into {out_path}.")
+    if moved:
+        print(f"  moved: {', '.join(moved)}")
+    if skipped:
+        print(f"  already in shared, left alone: {', '.join(skipped)}")
     print("Structural/symbol anchors were dropped; only Topic/Operation anchors travel.")
-    if collide:
-        print(f"  ! these ids already exist in this project and a load would OVERWRITE them: "
-              f"{', '.join(collide)}. Rename them in the shared file first if that is not what you want.",
-              file=sys.stderr)
-    print(f"Review it, then load it:  neoize load-lessons {out_path}")
+    verb = "copied (still in the project too)" if args.copy else "removed from the project files"
+    print(f"The project copies were {verb}.")
+    print("Load both layers now:  neoize shared load   &&   neoize load-lessons --prune")
     return 0
+
+
+def _global_container():
+    """The global server's container. The shared layer always lives in the one global server, never in a
+    project-mode container, so shared operations target this regardless of the current project's mode."""
+    return os.environ.get("NEOIZE_NEO4J_CONTAINER") or "neoize-neo4j"
+
+
+def cmd_shared(args):
+    """Lifecycle of the universal (shared) layer: the authored store at ~/.neoize/shared/lessons loads into
+    product=shared in the GLOBAL server, which every session reads on top of its own product."""
+    if args.shared_cmd == "dir":
+        print(_shared_store())
+        return 0
+    container = _global_container()
+    if not _container_running(container):
+        print(f"Global Neo4j container '{container}' is not running. Start it with: neoize up (global "
+              f"mode).", file=sys.stderr)
+        return 1
+    if args.shared_cmd == "status":
+        proc = subprocess.run(
+            ["docker", "exec", "-i", container, "cypher-shell", "-u",
+             os.environ.get("NEOIZE_NEO4J_USER") or "neo4j", "-p",
+             os.environ.get("NEOIZE_NEO4J_PASSWORD") or "neoize-local", "--format", "plain",
+             "--param", f"p => {json.dumps(SHARED)}"],
+            input="MATCH (n {product:$p}) RETURN labels(n)[0] AS label, count(*) AS n ORDER BY n DESC",
+            text=True, capture_output=True, check=False)
+        print("Shared layer node counts by label:")
+        print(proc.stdout.rstrip() if proc.stdout.strip() else "  (shared layer is empty)")
+        return proc.returncode
+    # load: force the shared product and the global container, so project mode cannot misdirect it.
+    sdir = _shared_lessons_dir()
+    if not (os.path.isdir(sdir) and glob.glob(os.path.join(sdir, "*.json"))):
+        print(f"no lessons/*.json in the shared store ({sdir}). Promote some lessons there first, or "
+              f"author them under {sdir}.", file=sys.stderr)
+        return 1
+    loader = os.path.join(_HERE, "load-lessons")
+    env = dict(os.environ, NEOIZE_PRODUCT=SHARED, NEOIZE_NEO4J_CONTAINER=container)
+    return subprocess.run([sys.executable, loader, *(["--prune"] if args.prune else []), sdir],
+                          check=False, env=env).returncode
 
 
 # ----------------------------------------------------------------------------- main
@@ -519,14 +640,18 @@ def main():
     pr.add_argument("--mode", choices=["global", "project"], help="write the server mode into .neoize/project.json")
     pr.set_defaults(func=cmd_product)
 
-    sh = sub.add_parser("share", help="import generic lessons from another product into this project")
-    sh.add_argument("--from", dest="src", required=True, help="source product id (used to name the file)")
-    sh.add_argument("--from-dir", dest="from_dir",
-                    help="path to the source project, its .neoize, or its lessons dir")
-    sh.add_argument("--lessons", help="comma-separated lesson ids to import")
-    sh.add_argument("--all", action="store_true", help="import every shareable lesson in the source")
-    sh.add_argument("--list", action="store_true", help="list the shareable lessons in the source and stop")
-    sh.set_defaults(func=cmd_share)
+    pm = sub.add_parser("promote", help="move project lessons up into the shared (universal) layer")
+    pm.add_argument("--lessons", help="comma-separated lesson ids to promote")
+    pm.add_argument("--list", action="store_true", help="list this project's promotable lessons and stop")
+    pm.add_argument("--copy", action="store_true",
+                    help="leave the project copy in place (default moves it, to avoid a double in the union)")
+    pm.set_defaults(func=cmd_promote)
+
+    sd = sub.add_parser("shared", help="lifecycle of the universal (shared) layer in the global server")
+    sd.add_argument("shared_cmd", choices=["load", "status", "dir"],
+                    help="load ~/.neoize/shared/lessons into product=shared, show its counts, or print its path")
+    sd.add_argument("--prune", action="store_true", help="on load, delete shared lessons absent from the store")
+    sd.set_defaults(func=cmd_shared)
 
     args = ap.parse_args()
     if not getattr(args, "func", None):

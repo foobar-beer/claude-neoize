@@ -28,11 +28,12 @@ tools wrap, kept as an optional terminal fallback. The map:
 ## Step 1 - confirm the graph is up, note the product, read its model
 
 Run `neoize status` (or a query through the MCP server). If it is down, tell the user to `neoize up`
-first and stop. `status` also prints the **product** this project resolves to: note it, because one
-server holds many products and every query must scope to this one by `{product:'<product>'}`. Read the
-model for THIS product only:
+first and stop. `status` prints the **product** this project resolves to and the **read union** this
+session uses: the shared layer plus this product, `['shared', '<product>']`. The user reads that union, so
+a knowledge query spans both (this project's lessons AND the universal shared ones), while a structural
+query stays on this product (the shared layer holds no code). Read the model for the union:
 
-- labels and their counts: `MATCH (n {product:'<product>'}) RETURN labels(n)[0] AS label, count(*) AS n ORDER BY n DESC`
+- labels and their counts: `MATCH (n) WHERE n.product IN ['shared','<product>'] RETURN labels(n)[0] AS label, count(*) AS n ORDER BY n DESC`
 - relationship types: `CALL db.relationshipTypes()`
 - property keys: `CALL db.propertyKeys()`
 
@@ -40,9 +41,16 @@ Do NOT invent examples for a label or relationship that is not in this list. If 
 knowledge layer (Lesson/Topic/Operation) and no structural layer yet, say so and show only the knowledge
 queries.
 
-Emit the cheat-sheet with the product value written IN, not as `$product`: the Neo4j Browser does not bind
-it, so `{product:'<theproduct>'}` makes each query run as pasted. Tell the user once that every query is
-scoped to their product this way.
+The Neo4j Browser does not bind `$products` or `$product` for you, so open the cheat-sheet by telling the
+user to run these two lines ONCE in the Browser, after which every query below runs as pasted:
+
+```
+:param products => ['shared', '<product>']
+:param product => '<product>'
+```
+
+Knowledge queries then scope with `WHERE n.product IN $products` (the shared+project union); structural
+queries scope with `{product:$product}` (this project only).
 
 ## Step 2 - pick real sample values
 
@@ -55,22 +63,24 @@ the busiest structural label. Use those actual values in the examples rather tha
 Print copy-paste blocks, each with a one-line "what it answers" above it. Group them. Only include a
 group whose nodes/edges exist.
 
-Every example scopes to the product, writing the value in. Use `P` below for the real product id.
+Knowledge queries scope to the union with `$products`; structural queries to `$product` (set once in
+Step 1). The `l.product` column is worth returning on knowledge queries, so the user sees which rows are
+shared and which are this project's.
 
-**Knowledge layer (always, if any Lesson exists):**
+**Knowledge layer (always, if any Lesson exists), union of shared and this project:**
 - every Topic and how many lessons it carries (the map of what the graph knows)
-- all lessons on one topic (use a real topic id): `MATCH (l:Lesson {product:'P'})-[:ANCHORS_TO]->(:Topic {product:'P', id:'<real>'}) RETURN l.title, l.body`
+- all lessons on one topic (use a real topic id): `MATCH (l:Lesson)-[:ANCHORS_TO]->(t:Topic {id:'<real>'}) WHERE l.product IN $products AND t.product IN $products RETURN l.product, l.title, l.body`
 - all lessons for one operation (use a real op id)
-- lessons that mention a term the user cares about: `MATCH (l:Lesson {product:'P'}) WHERE l.body CONTAINS '<term>' RETURN l.title, l.body`
+- lessons that mention a term the user cares about: `MATCH (l:Lesson) WHERE l.product IN $products AND l.body CONTAINS '<term>' RETURN l.product, l.title, l.body`
 - the oldest lessons (reconcile candidates): order by `prov_date`
 
-**Structural layer (only for the labels/edges that exist):** for each relationship type present, show one
-traversal in plain terms, for example "which <From> is linked to which <To>":
-`MATCH (a:<FromLabel> {product:'P'})-[:<REL>]->(b:<ToLabel> {product:'P'}) RETURN a.id, b.id`. If a
-transitive dependency-style edge exists (a self-referential edge on one label, e.g. DEPENDS_ON), show a
-blast-radius walk: `MATCH (x {product:'P', id:'<real>'})<-[:<REL>*]-(d {product:'P'}) RETURN DISTINCT d.id`.
+**Structural layer (only for the labels/edges that exist), this project only:** for each relationship type
+present, show one traversal in plain terms, for example "which <From> is linked to which <To>":
+`MATCH (a:<FromLabel> {product:$product})-[:<REL>]->(b:<ToLabel> {product:$product}) RETURN a.id, b.id`. If
+a transitive dependency-style edge exists (a self-referential edge on one label, e.g. DEPENDS_ON), show a
+blast-radius walk: `MATCH (x {product:$product, id:'<real>'})<-[:<REL>*]-(d {product:$product}) RETURN DISTINCT d.id`.
 If the structural nodes carry lessons, show how to pull the lessons for a node:
-`MATCH (l:Lesson {product:'P'})-[:ANCHORS_TO]->({product:'P', id:'<real>'}) RETURN l.title, l.body`.
+`MATCH (l:Lesson {product:$product})-[:ANCHORS_TO]->({product:$product, id:'<real>'}) RETURN l.title, l.body`.
 
 **Schema overview (always):** the whole-graph shape, for orientation:
 `CALL db.schema.visualization()` and the label-count query from Step 1.

@@ -55,9 +55,12 @@ def _triggers_path():
     return None
 
 
+SHARED = "shared"
+
+
 def _product():
-    """The product whose Operation lessons to pull, so one shared server's many products do not cross
-    reminders. NEOIZE_PRODUCT, then .neoize/project.json (project dir then cwd), then the repo name."""
+    """The project's own product. NEOIZE_PRODUCT, then .neoize/project.json (project dir then cwd), then
+    the repo name. The reminder pulls lessons from this product AND the shared layer together."""
     env = os.environ.get("NEOIZE_PRODUCT")
     if env:
         return env
@@ -79,6 +82,13 @@ def _product():
     except Exception:
         pass
     return os.path.basename(os.path.abspath(proj))
+
+
+def _read_products():
+    """The products the reminder spans: the shared baseline plus this project's own, so an operation pulls
+    both its universal lessons (git-push discipline) and this project's own."""
+    cur = _product()
+    return [SHARED] if cur == SHARED else [SHARED, cur]
 
 
 def _project_json():
@@ -121,15 +131,16 @@ def load_triggers():
 
 
 def lessons_for(operation):
-    """Titles of the lessons anchored to this Operation IN THIS PRODUCT, or None if the graph cannot be
-    reached. Scoped by product so one shared server's other products never leak their reminders in."""
-    query = ("MATCH (l:Lesson {product:$product})-[:ANCHORS_TO]->"
-             "(:Operation {product:$product, id:$op}) RETURN l.title ORDER BY l.title")
+    """Titles of the lessons anchored to this Operation across the shared+project union, or None if the
+    graph cannot be reached. Scoped to $products so other products' reminders never leak in, while the
+    universal (shared) lessons for this operation always do."""
+    query = ("MATCH (l:Lesson)-[:ANCHORS_TO]->(o:Operation {id:$op}) "
+             "WHERE l.product IN $products AND o.product IN $products RETURN l.title ORDER BY l.title")
     try:
         out = subprocess.run(
             ["docker", "exec", "-i", _container(), "cypher-shell",
              "-u", USER, "-p", PASSWORD, "--format", "plain",
-             "--param", f"product => {json.dumps(_product())}",
+             "--param", f"products => {json.dumps(_read_products())}",
              "--param", f"op => {json.dumps(operation)}"],
             input=query, text=True, capture_output=True, timeout=8,
         )
@@ -169,8 +180,8 @@ def main():
                          f'is not reachable right now (check it is up). Proceeding.\n')
         sys.exit(0)
 
-    query = (f"MATCH (l:Lesson {{product:$product}})-[:ANCHORS_TO]->"
-             f"(:Operation {{product:$product, id:'{operation}'}}) RETURN l.title, l.body")
+    query = (f"MATCH (l:Lesson)-[:ANCHORS_TO]->(o:Operation {{id:'{operation}'}}) "
+             f"WHERE l.product IN $products AND o.product IN $products RETURN l.title, l.body")
     if titles:
         listing = "".join(f"\n  - {t}" for t in titles)
         sys.stderr.write(
