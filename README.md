@@ -143,6 +143,7 @@ whole graph by calling tools, with nothing on PATH and no script for the human t
 - `load_lessons`, `load_graph`, `rebuild_structure`: load the lessons, load the structure, or regenerate
   the structure from the code.
 - `check_lessons`, `check_graph`: the offline validations.
+- `sync_queries`: re-sync `.neoize/queries` from the plugin templates (queries only; dry by default).
 - `promote_lessons`: move a project lesson up into the universal `shared` layer.
 - `load_shared`: load the universal lessons store into product=shared.
 - `apply`: end of work, apply everything (structure, symbols, lessons, shared) to the graph in one pass.
@@ -163,6 +164,7 @@ neoize load-graph <file>  # load the collector's .cypher, resetting only this pr
 neoize shared load        # load the universal store (~/.neoize/shared/lessons) into product=shared
 neoize apply              # end of work: regenerate + load structure, symbols, lessons and shared in one pass
 neoize check [path]       # validate lessons files locally, before they touch the graph
+neoize sync-queries       # re-sync .neoize/queries from the plugin templates (queries only; --write to apply)
 neoize query "<cypher>"   # run one Cypher query ($product and $products are bound for scoping)
 neoize product [--set ID] [--mode global|project]   # print or set the product and mode
 neoize promote --lessons a,b,c   # move project lessons up into the shared (universal) layer

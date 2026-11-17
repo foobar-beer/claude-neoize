@@ -24,6 +24,7 @@ CONTROL (mutating): these drive the local graph and the project's .neoize/ files
   - rebuild_structure : regenerate the structural graph from the code (runs .neoize/collect.py).
   - check_lessons     : validate the lessons files offline (no graph).
   - check_graph       : run the project's structural check offline (.neoize/check.py).
+  - sync_queries      : re-sync .neoize/queries from the plugin templates (queries only).
   - promote_lessons   : move project lessons up into the universal (shared) layer.
   - load_shared       : load the universal lessons store into product=shared.
   - apply             : end of work, apply everything (structure, symbols, lessons, shared) to the graph.
@@ -37,9 +38,10 @@ the universal layer that holds for all work with Claude. A session READS the UNI
 product: $products is bound to [shared, <this product>] and a read scopes with `product IN $products`, so
 universal knowledge is always in view and the project's own lessons complement it. $product (singular, this
 project's product, resolved from NEOIZE_PRODUCT, .neoize/project.json, or the repo name) is the single WRITE
-target. A read that names a per-product label (Lesson/Topic/Operation) without scoping by product is refused
-(pass cross_space:true for a deliberate unscoped read). The structural reset and the loaders scope by a
-single product, so products never collide.
+target. Because every node carries a product, a read that matches nodes by label without a real product
+constraint is refused (merely RETURNing product does not count; pass cross_space:true for a deliberate
+read across all products). The structural reset and the loaders scope by a single product, so products
+never collide.
 
 Connection from the environment. Under the plugin these variables are injected by .mcp.json from the
 user's configured options (userConfig), so nothing ambient is read; for a direct run they can be set by
@@ -153,15 +155,21 @@ def _cypher(query, params=None):
     return True, proc.stdout.strip()
 
 
-# Knowledge-layer labels that are per-product: a query that names one but does not scope by product reads
-# across EVERY product on the server, leaking other products' rows in. The discriminant is mandatory here.
-_SCOPED_LABEL = re.compile(r"\b(Lesson|Topic|Operation)\b")
+# A node pattern that pins a label, e.g. (l:Lesson), (:Topic), (s:Symbol). EVERY node carries a product,
+# so any such read spans every product on the server unless it constrains `product`. Relationship types
+# use [..] and map literals use {..}, so neither is caught here; `CALL db.labels()` has no node pattern,
+# so get_neo4j_schema is never blocked.
+_LABELED_NODE = re.compile(r"\(\s*\w*\s*:\s*[A-Za-z_]\w*")
+# A real product constraint: `product` used as a map key, compared, or an IN test. Merely RETURNing or
+# ordering by `l.product` is NOT a constraint, so the bare word "product" does not satisfy the scope.
+_PRODUCT_CONSTRAINT = re.compile(r"product\s*(:|=|\bIN\b)", re.IGNORECASE)
 
 
 def _needs_scope(query):
-    """True when the query names a per-product label but never mentions `product`, so it would read across
-    every product. The standard scope is `WHERE n.product IN $products` (the shared+project union)."""
-    return bool(_SCOPED_LABEL.search(query)) and "product" not in query
+    """True when the query matches labelled nodes but does not CONSTRAIN product, so it would read across
+    every product. The fix is a real filter (`WHERE n.product IN $products`, the pre-bound shared+project
+    union, or `{product:$product}`), not just mentioning product in RETURN."""
+    return bool(_LABELED_NODE.search(query)) and not _PRODUCT_CONSTRAINT.search(query)
 
 
 def tool_read(args):
@@ -173,12 +181,12 @@ def tool_read(args):
         return True, "refused: this server's query tool is read-only and the query contains a write " \
                      "clause. Use a control tool (load_lessons, load_graph, rebuild_structure) for a write."
     if _needs_scope(query) and not args.get("cross_space"):
-        return False, ("refused: this query reads a per-product label (Lesson/Topic/Operation) without "
-                       "scoping by `product`, so it would span every product on the server. Scope it to "
-                       "the shared+project union with `WHERE n.product IN $products` (pre-bound), e.g. "
-                       "MATCH (l:Lesson)-[:ANCHORS_TO]->(t:Topic {id:'x'}) WHERE l.product IN $products "
-                       "AND t.product IN $products. For a deliberate unscoped read across all products, "
-                       "pass cross_space:true.")
+        return False, ("refused: this query matches nodes by label but does not CONSTRAIN `product`, so it "
+                       "would span every product on the server. Mentioning product in RETURN is not enough; "
+                       "add a real filter. Scope it to the shared+project union with `WHERE n.product IN "
+                       "$products` (pre-bound) on each matched node, e.g. MATCH (l:Lesson)-[:ANCHORS_TO]->"
+                       "(t:Topic {id:'x'}) WHERE l.product IN $products AND t.product IN $products. For a "
+                       "deliberate read across all products, pass cross_space:true.")
     ok, out = _cypher(query, args.get("params"))
     if not ok:
         return ok, out
@@ -259,6 +267,14 @@ def tool_check_graph(args):
     return _cli("check-graph", timeout=120)
 
 
+def tool_sync_queries(args):
+    """Re-sync .neoize/queries from the plugin's shipped query templates (QUERIES ONLY; never lessons, the
+    collector or anything else). Default is a dry run; set write to apply, diff to show each change."""
+    args = args or {}
+    sub = ["sync-queries"] + (["--write"] if args.get("write") else []) + (["--diff"] if args.get("diff") else [])
+    return _cli(*sub, timeout=60)
+
+
 def tool_promote(args):
     """Move project lessons UP into the universal (shared) layer, so knowledge that holds for all work
     with Claude is read by every session. A file operation: the chosen lessons leave this project's lessons
@@ -297,12 +313,12 @@ TOOLS = [
         "description": "Run a read-only Cypher query against the local neoize knowledge graph and return "
                        "the rows as text. Write clauses are refused. Every node carries a `product`; this "
                        "session reads the UNION of the universal `shared` layer and its own product, "
-                       "pre-bound as $products. Scope any read of a per-product label with `WHERE "
-                       "n.product IN $products`, e.g. MATCH (l:Lesson)-[:ANCHORS_TO]->(t:Topic {id:'x'}) "
-                       "WHERE l.product IN $products AND t.product IN $products. A query that names "
-                       "Lesson/Topic/Operation without `product` is refused (it would read every product); "
-                       "pass cross_space:true to override for a deliberate all-product read. Optional "
-                       "$params are passed as Cypher parameters.",
+                       "pre-bound as $products. Scope every matched node with `WHERE n.product IN "
+                       "$products`, e.g. MATCH (l:Lesson)-[:ANCHORS_TO]->(t:Topic {id:'x'}) WHERE "
+                       "l.product IN $products AND t.product IN $products. A query that matches nodes by "
+                       "label without a real product constraint is refused (it would read every product, "
+                       "and RETURNing product is not a constraint); pass cross_space:true to override for "
+                       "a deliberate all-product read. Optional $params are passed as Cypher parameters.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -385,6 +401,22 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}}
     },
     {
+        "name": "sync_queries",
+        "description": "Re-sync .neoize/queries/*.cypher from the plugin's shipped query templates, QUERIES "
+                       "ONLY (never lessons, the collector, triggers or anything else). A project's saved "
+                       "queries were copied at init, so a plugin that improves them (e.g. the shared+project "
+                       "union scoping) leaves the copies behind; this brings them forward. Default is a dry "
+                       "run that classifies each as new/changed/up-to-date; set diff to see each change and "
+                       "write to apply. Read the diff before writing: a query you customised shows as changed.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "write": {"type": "boolean", "description": "Apply the sync (default is a dry run)."},
+                "diff": {"type": "boolean", "description": "Show the unified diff of each changed file."}
+            }
+        }
+    },
+    {
         "name": "promote_lessons",
         "description": "MUTATING (writes files). Move project lessons UP into the universal (shared) layer, "
                        "so knowledge that holds for ALL work with Claude is read by every session. The "
@@ -442,6 +474,7 @@ DISPATCH = {
     "rebuild_structure": tool_rebuild_structure,
     "check_lessons": tool_check_lessons,
     "check_graph": tool_check_graph,
+    "sync_queries": tool_sync_queries,
     "promote_lessons": tool_promote,
     "load_shared": tool_load_shared,
     "apply": tool_apply,

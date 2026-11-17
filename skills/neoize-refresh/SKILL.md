@@ -29,6 +29,7 @@ tools wrap, kept as an optional terminal fallback. The map:
 - `check_lessons` / `check_graph`: the offline validations (`neoize check` / `neoize check-graph`).
 - `load_shared`: reload the universal store into product=shared (`neoize shared load`).
 - `apply`: do all of the above in one pass (structure, symbols, lessons, shared) (`neoize apply`).
+- `sync_queries`: re-sync `.neoize/queries` from the plugin templates, queries only (`neoize sync-queries`).
 - `read_neo4j_cypher` / `get_neo4j_schema`: query the graph (scope reads with `WHERE n.product IN
   $products`, the pre-bound shared+project union) and read its shape.
 
@@ -63,6 +64,22 @@ The code's structure changed (a new module, a renamed entity, a changed dependen
    `neoize load-lessons .neoize/lessons` immediately after, then confirm the resolved-anchor count comes
    back to where it was. A structural reload that is not followed by a lesson reload leaves the graph
    under-anchored and nothing errors, so do not skip it.
+
+## Re-sync the saved queries (after a plugin update)
+
+A project's `.neoize/queries/*.cypher` were copied from the plugin templates at init, so a plugin that
+improves them (for example the shared+project union scoping) leaves the project's copies behind. Bring
+them forward with `sync_queries`. It is QUERIES ONLY: it never touches lessons, the collector, triggers,
+project.json or anything else authored.
+
+1. Run it dry first (the default): it classifies each template as new, changed or up-to-date and writes
+   nothing. Add `diff` to see the unified diff of each changed file.
+2. READ the diff of any `changed` file before applying. "Changed" means the project's copy differs from
+   the template, which is usually just the old unscoped form, but it is also how a query YOU customised
+   (a real topic id written in, a project-specific traversal) shows up. Keep a genuine customisation
+   rather than overwriting it; apply the rest.
+3. Apply with `write`. Then confirm the saved queries now carry `WHERE n.product IN $products` so they are
+   not refused by the read tool and do not bleed across products.
 
 ## Reconcile a stale lesson when closing a ticket
 
