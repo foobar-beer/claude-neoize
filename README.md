@@ -145,6 +145,7 @@ whole graph by calling tools, with nothing on PATH and no script for the human t
 - `check_lessons`, `check_graph`: the offline validations.
 - `promote_lessons`: move a project lesson up into the universal `shared` layer.
 - `load_shared`: load the universal lessons store into product=shared.
+- `apply`: end of work, apply everything (structure, symbols, lessons, shared) to the graph in one pass.
 
 The query tool is read-only (a write clause is refused). The control tools are explicitly mutating, and
 the host gates each tool call, so a write still asks.
@@ -160,6 +161,7 @@ neoize status             # is it up, the shared+project counts this session rea
 neoize load-lessons [p]   # load authored lessons (default .neoize/lessons); --prune drops removed ones
 neoize load-graph <file>  # load the collector's .cypher, resetting only this product's structural layer
 neoize shared load        # load the universal store (~/.neoize/shared/lessons) into product=shared
+neoize apply              # end of work: regenerate + load structure, symbols, lessons and shared in one pass
 neoize check [path]       # validate lessons files locally, before they touch the graph
 neoize query "<cypher>"   # run one Cypher query ($product and $products are bound for scoping)
 neoize product [--set ID] [--mode global|project]   # print or set the product and mode

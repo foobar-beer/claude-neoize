@@ -26,6 +26,7 @@ CONTROL (mutating): these drive the local graph and the project's .neoize/ files
   - check_graph       : run the project's structural check offline (.neoize/check.py).
   - promote_lessons   : move project lessons up into the universal (shared) layer.
   - load_shared       : load the universal lessons store into product=shared.
+  - apply             : end of work, apply everything (structure, symbols, lessons, shared) to the graph.
 
 Read-only is enforced on read_neo4j_cypher, because cypher-shell has no read-only flag: a query
 containing a write clause (CREATE, MERGE, DELETE, SET, REMOVE, DROP, FOREACH, LOAD CSV) is refused. The
@@ -57,7 +58,7 @@ USER = os.environ.get("NEOIZE_NEO4J_USER") or "neo4j"
 PASSWORD = os.environ.get("NEOIZE_NEO4J_PASSWORD") or "neoize-local"
 
 SERVER_NAME = "neoize-neo4j"
-SERVER_VERSION = "0.4.0"
+SERVER_VERSION = "0.4.4"
 
 # The reserved product id for the universal layer, read by every session on top of its own product.
 SHARED = "shared"
@@ -281,6 +282,15 @@ def tool_load_shared(args):
     return _cli(*sub)
 
 
+def tool_apply(args):
+    """Apply EVERYTHING authored to the live graph in one pass: regenerate and load the structural layer,
+    run the project's symbol-layer refresh if it declares one, load this project's lessons (pruned), then
+    load the shared layer. The end-of-work companion to wrap: it takes 'the JSON is saved' to 'the graph is
+    current'. Set no_prune to keep graph lessons that are absent from the files."""
+    args = args or {}
+    return _cli("apply", *(["--no-prune"] if args.get("no_prune") else []), timeout=1800)
+
+
 TOOLS = [
     {
         "name": "read_neo4j_cypher",
@@ -402,6 +412,21 @@ TOOLS = [
             "type": "object",
             "properties": {"prune": {"type": "boolean", "description": "Delete shared lessons not in the store."}}
         }
+    },
+    {
+        "name": "apply",
+        "description": "MUTATING. Apply EVERYTHING authored to the live graph in one pass, the end-of-work "
+                       "companion to wrap: it regenerates and loads the structural layer (.neoize/collect.py "
+                       "then load-graph), runs the project's symbol-layer refresh if project.json declares a "
+                       "`symbols_refresh` command, loads this project's lessons with prune, then loads the "
+                       "shared layer. This is what takes 'the JSON is saved' to 'the graph is current', so a "
+                       "new lesson or symbol is actually retrievable. Each step is skipped when it does not "
+                       "apply and the run stops on the first failure. Can take minutes if a symbol layer is "
+                       "rebuilt. Set no_prune to keep graph lessons absent from the files.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"no_prune": {"type": "boolean", "description": "Keep graph lessons absent from the files (default prunes the project layer)."}}
+        }
     }
 ]
 
@@ -419,6 +444,7 @@ DISPATCH = {
     "check_graph": tool_check_graph,
     "promote_lessons": tool_promote,
     "load_shared": tool_load_shared,
+    "apply": tool_apply,
 }
 
 
