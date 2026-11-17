@@ -1,8 +1,10 @@
 # Explicit compose project name. Without it, compose derives the project from the directory holding this
-# file, which is `.neoize` for a project-mode compose, so every project-mode graph would collapse onto the
-# same project `neoize` and a `docker compose down` in one would tear down another's container (and the
-# shared server). In project mode init sets this to neoize-<product>; keep it unique per server.
-name: neoize
+# file, which is `.neoize`, so every neoize compose would collapse onto one project `neoize` and a
+# `docker compose down` in one would tear down another's container (and its volume). The default here is
+# `neoize-global`, the global server's project: deliberately NOT bare `neoize` (a legacy per-project graph
+# may already own that project name and its `neoize_neoize_data` volume) and NOT a project-mode
+# `neoize-<product>`. In project mode init overrides this to neoize-<product>; keep it unique per server.
+name: neoize-global
 services:
   neo4j:
     image: neo4j:5.26.0-community
@@ -24,10 +26,12 @@ services:
       # a local dev graph on a local password, so it must never be reachable off this host.
       - "127.0.0.1:7474:7474"   # Browser (http://localhost:7474)
       - "127.0.0.1:7687:7687"   # Bolt (cypher-shell, the MCP server)
+    restart: unless-stopped
     volumes:
       # Persistent so the graph survives a restart. It is only a projection of the authored JSON and
-      # the code, so it can always be rebuilt; the volume saves the reload, not the data.
-      - neoize_data:/data
+      # the code, so it can always be rebuilt; the volume saves the reload, not the data. Named `data`,
+      # so under the project it is `neoize-global_data`, distinct from a legacy `neoize_neoize_data`.
+      - data:/data
     healthcheck:
       test: ["CMD-SHELL", "cypher-shell -u neo4j -p neoize-local 'RETURN 1' || exit 1"]
       interval: 10s
@@ -35,4 +39,4 @@ services:
       retries: 10
 
 volumes:
-  neoize_data:
+  data:
