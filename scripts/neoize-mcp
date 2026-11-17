@@ -60,7 +60,7 @@ USER = os.environ.get("NEOIZE_NEO4J_USER") or "neo4j"
 PASSWORD = os.environ.get("NEOIZE_NEO4J_PASSWORD") or "neoize-local"
 
 SERVER_NAME = "neoize-neo4j"
-SERVER_VERSION = "0.4.4"
+SERVER_VERSION = "0.4.5"
 
 # The reserved product id for the universal layer, read by every session on top of its own product.
 SHARED = "shared"
@@ -450,14 +450,15 @@ TOOLS = [
         "description": "MUTATING. Apply EVERYTHING authored to the live graph in one pass, the end-of-work "
                        "companion to wrap: it regenerates and loads the structural layer (.neoize/collect.py "
                        "then load-graph), runs the project's symbol-layer refresh if project.json declares a "
-                       "`symbols_refresh` command, loads this project's lessons with prune, then loads the "
-                       "shared layer. This is what takes 'the JSON is saved' to 'the graph is current', so a "
+                       "`symbols_refresh` command, loads this project's lessons, then loads the shared layer. "
+                       "Both lesson layers are pruned against their store, so a retired lesson leaves the "
+                       "graph too. This is what takes 'the JSON is saved' to 'the graph is current', so a "
                        "new lesson or symbol is actually retrievable. Each step is skipped when it does not "
                        "apply and the run stops on the first failure. Can take minutes if a symbol layer is "
-                       "rebuilt. Set no_prune to keep graph lessons absent from the files.",
+                       "rebuilt. Set no_prune to keep graph lessons absent from the files (both layers additive).",
         "inputSchema": {
             "type": "object",
-            "properties": {"no_prune": {"type": "boolean", "description": "Keep graph lessons absent from the files (default prunes the project layer)."}}
+            "properties": {"no_prune": {"type": "boolean", "description": "Keep graph lessons absent from the files (default prunes both the project and shared layers)."}}
         }
     }
 ]

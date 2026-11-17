@@ -622,8 +622,9 @@ def cmd_apply(args):
                      (its language-specific extractor and loader), which the plugin cannot do generically.
       3. lessons   - load-lessons --prune over .neoize/lessons (the full set, so retired or moved lessons
                      also leave the graph), which re-resolves the anchors a structural reload dropped.
-      4. shared    - load the universal store additively (global mode only), so a lesson routed to shared
-                     this session lands too."""
+      4. shared    - load the universal store (global mode only), pruned like the project layer, so a
+                     lesson routed to shared this session lands and a retired one leaves. Both layers prune
+                     against their own store, so --no-prune makes both purely additive."""
     from argparse import Namespace
     # The step headers print from this process while the sub-steps write to stdout directly, so keep the
     # two in order by flushing this process's prints on every newline.
@@ -677,8 +678,8 @@ def cmd_apply(args):
     if _mode() != "project":
         sdir = _shared_lessons_dir()
         if os.path.isdir(sdir) and glob.glob(os.path.join(sdir, "*.json")):
-            print("\n== 4/4 shared: load the universal layer (additive) ==")
-            rc = cmd_shared(Namespace(shared_cmd="load", prune=False))
+            print(f"\n== 4/4 shared: load the universal layer{' --prune' if prune else ''} ==")
+            rc = cmd_shared(Namespace(shared_cmd="load", prune=prune))
             if rc != 0:
                 return rc
         else:

@@ -110,10 +110,10 @@ Authoring a lesson writes a JSON file; it is not in the graph until it is loaded
 only on disk is not retrievable. End the session by applying the whole of what you wrote, in one pass:
 
 - Run `apply` (`neoize apply`). It regenerates and loads the structural layer, runs the project's
-  symbol-layer refresh if it has one, loads this project's lessons (pruned, so retired or moved lessons
-  also leave the graph), then loads the shared layer. It is the one action that takes everything you saved
-  this session, structure and symbols and project and shared lessons, into the live graph together, in the
-  right order so the anchors resolve.
+  symbol-layer refresh if it has one, loads this project's lessons, then loads the shared layer. Both lesson
+  layers are pruned against their store, so a retired or moved lesson leaves the graph too, not only the new
+  ones land. It is the one action that takes everything you saved this session, structure and symbols and
+  project and shared lessons, into the live graph together, in the right order so the anchors resolve.
 - Read the resolved-anchor denominator `apply` prints from the lesson load: an anchor that did not resolve
   is reported by name, so fix the id, never leave a lesson anchored to nothing. If `apply` stops on a step,
   fix that step rather than loading the rest by hand.
