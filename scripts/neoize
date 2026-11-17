@@ -32,6 +32,7 @@ into the shared layer.
   neoize load-lessons ...   # load authored lessons for this product (delegates to scripts/load-lessons)
   neoize load-graph <file>  # load this product's collector .cypher, resetting only its structural layer
   neoize shared load        # load the universal lessons store (~/.neoize/shared/lessons) into `shared`
+  neoize apply              # end of work: regenerate + load structure, symbols, lessons and shared in one pass
   neoize check [path]       # validate lessons files locally: schema, duplicate ids, dangling supersedes
   neoize sync-queries       # re-sync .neoize/queries from the plugin templates (queries only; dry by default)
   neoize check-graph        # run the project's structural check (.neoize/check.py), if it has one
@@ -605,6 +606,90 @@ def cmd_shared(args):
                           check=False, env=env).returncode
 
 
+# ----------------------------------------------------------------------------- apply (full graph refresh)
+def cmd_apply(args):
+    """Apply EVERYTHING authored to the live graph in one pass: the end-of-work companion to wrap. It
+    regenerates and loads the structural layer, runs the project's symbol-layer refresh if it declares one,
+    loads this project's lessons, then loads the shared layer, all scoped to this product. It is the single
+    command that takes 'I saved the JSON' to 'the graph is current', so a lesson or a new symbol is actually
+    retrievable, not just on disk.
+
+    Each step is skipped cleanly when it does not apply, and the run stops on the first failure:
+      1. structure - run .neoize/collect.py (if present), then load-graph the .cypher it writes (resets
+                     only this product's structural projection).
+      2. symbols   - run project.json "symbols_refresh" (a shell command) if set, with NEOIZE_PRODUCT and
+                     the container bound. This is where a project regenerates and loads its own symbol layer
+                     (its language-specific extractor and loader), which the plugin cannot do generically.
+      3. lessons   - load-lessons --prune over .neoize/lessons (the full set, so retired or moved lessons
+                     also leave the graph), which re-resolves the anchors a structural reload dropped.
+      4. shared    - load the universal store additively (global mode only), so a lesson routed to shared
+                     this session lands too."""
+    from argparse import Namespace
+    # The step headers print from this process while the sub-steps write to stdout directly, so keep the
+    # two in order by flushing this process's prints on every newline.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+    container, _, _ = _env()
+    if not _container_running(container):
+        print(f"Neo4j container '{container}' is not running. Start it with: neoize up", file=sys.stderr)
+        return 1
+    product = _product()
+    prune = not args.no_prune
+    print(f"Applying everything to the graph for product '{product}' ({_mode()} mode).\n")
+
+    collect = os.path.join(_neoize_dir(), "collect.py")
+    gcypher = os.path.join(_neoize_dir(), "graph.cypher")
+    if os.path.isfile(collect):
+        print("== 1/4 structure: regenerate (collect.py) ==")
+        rc = subprocess.run([sys.executable, collect], cwd=_project_dir(), check=False).returncode
+        if rc != 0:
+            print("collect.py failed; stopping before anything is loaded.", file=sys.stderr)
+            return rc
+        if os.path.isfile(gcypher):
+            print("== 1/4 structure: load-graph ==")
+            rc = cmd_load_graph(Namespace(file=gcypher))
+            if rc != 0:
+                return rc
+        else:
+            print(f"(collect.py ran but wrote no {gcypher}; skipping load-graph)")
+    else:
+        print("== 1/4 structure: no .neoize/collect.py, skipping ==")
+
+    sr = _project_json().get("symbols_refresh")
+    if sr:
+        print(f"\n== 2/4 symbols: project symbols_refresh ==\n$ {sr}")
+        env = dict(os.environ, NEOIZE_PRODUCT=product, NEOIZE_NEO4J_CONTAINER=container)
+        rc = subprocess.run(sr, shell=True, cwd=_project_dir(), env=env, check=False).returncode
+        if rc != 0:
+            print("symbols_refresh failed; stopping before lessons so anchors are not half-resolved.",
+                  file=sys.stderr)
+            return rc
+    else:
+        print("\n== 2/4 symbols: no 'symbols_refresh' in project.json, skipping ==")
+
+    print(f"\n== 3/4 lessons: load-lessons{' --prune' if prune else ''} ==")
+    rc = cmd_load_lessons(Namespace(paths=None, prune=prune))
+    if rc != 0:
+        return rc
+
+    if _mode() != "project":
+        sdir = _shared_lessons_dir()
+        if os.path.isdir(sdir) and glob.glob(os.path.join(sdir, "*.json")):
+            print("\n== 4/4 shared: load the universal layer (additive) ==")
+            rc = cmd_shared(Namespace(shared_cmd="load", prune=False))
+            if rc != 0:
+                return rc
+        else:
+            print("\n== 4/4 shared: the universal store is empty, skipping ==")
+    else:
+        print("\n== 4/4 shared: project mode has no shared layer, skipping ==")
+
+    print(f"\nDone. The graph is current for product '{product}'.")
+    return 0
+
+
 # ----------------------------------------------------------------------------- main
 def cmd_sync_queries(args):
     """Re-sync .neoize/queries/*.cypher from the plugin's shipped query templates. QUERIES ONLY: it never
@@ -709,6 +794,12 @@ def main():
                     help="load ~/.neoize/shared/lessons into product=shared, show its counts, or print its path")
     sd.add_argument("--prune", action="store_true", help="on load, delete shared lessons absent from the store")
     sd.set_defaults(func=cmd_shared)
+
+    ap_apply = sub.add_parser("apply",
+                              help="apply everything (structure, symbols, lessons, shared) to the graph")
+    ap_apply.add_argument("--no-prune", action="store_true",
+                          help="keep graph lessons absent from the files (default prunes the project layer)")
+    ap_apply.set_defaults(func=cmd_apply)
 
     args = ap.parse_args()
     if not getattr(args, "func", None):

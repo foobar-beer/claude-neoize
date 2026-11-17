@@ -10,6 +10,12 @@ You are bringing the graph back into agreement with the code and the authored le
 projection: it is always safe to rebuild, never hand-edit it in the Neo4j browser, because a reload
 loses the edit. Run this against a running graph (`neoize status`; `neoize up` if it is down).
 
+The fastest path, when you just want EVERYTHING current, is `apply` (`neoize apply`): it regenerates and
+loads the structure, runs the project's symbol-layer refresh, loads the project lessons pruned and the
+shared layer, in one pass and the right order. Reach for it after a working session (it is what
+`neoize-wrap` ends with). The piecemeal steps below are for when you want to reload ONE layer on its own,
+or need to understand or debug what `apply` runs.
+
 ## Driving neoize: call the tools, not a shell path
 
 Every neoize operation runs as a **plugin MCP tool**, so drive it by calling the tool, with nothing on
@@ -22,6 +28,7 @@ tools wrap, kept as an optional terminal fallback. The map:
 - `rebuild_structure`: regenerate the structure from the code (runs `.neoize/collect.py`).
 - `check_lessons` / `check_graph`: the offline validations (`neoize check` / `neoize check-graph`).
 - `load_shared`: reload the universal store into product=shared (`neoize shared load`).
+- `apply`: do all of the above in one pass (structure, symbols, lessons, shared) (`neoize apply`).
 - `sync_queries`: re-sync `.neoize/queries` from the plugin templates, queries only (`neoize sync-queries`).
 - `read_neo4j_cypher` / `get_neo4j_schema`: query the graph (scope reads with `WHERE n.product IN
   $products`, the pre-bound shared+project union) and read its shape.

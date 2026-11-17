@@ -41,6 +41,7 @@ tools wrap, kept as an optional terminal fallback. The map:
 - `rebuild_structure`: regenerate the structure from the code (runs `.neoize/collect.py`).
 - `check_lessons` / `check_graph`: the offline validations (`neoize check` / `neoize check-graph`).
 - `load_shared`: load the universal store into product=shared (`neoize shared load`).
+- `apply`: end of work, apply structure, symbols, lessons and shared to the graph in one pass (`neoize apply`).
 - `promote_lessons`: move a project lesson up into the shared space (`neoize promote`).
 - `read_neo4j_cypher` / `get_neo4j_schema`: query the graph and read its shape. A read scopes to the
   shared+project union with `WHERE n.product IN $products` (pre-bound); the tool refuses a
@@ -103,18 +104,22 @@ the present tense reads as current and gets cited, so reconcile it rather than l
 Never auto-retire on the citation alone, and carry the denominator (how many cited, how many actually
 reconciled).
 
-## Step 5 - load and prove
+## Step 5 - apply everything to the graph (saving the JSON is not the end)
 
-- Load each space you wrote to. Project lessons: `neoize load-lessons .neoize/lessons` (`load_lessons`).
-  Shared lessons: `neoize shared load` (`load_shared`). Read the resolved-anchor denominator from each. An
-  anchor that did not resolve is reported by name: fix the id, never leave a lesson anchored to nothing.
-  Each load prunes only its own space, so loading one never disturbs the other.
-- If you promoted an existing project lesson up to shared this session, run both loaders with the prune
-  option so the moved lesson leaves the project space and lands in shared, in one pass.
-- If the code's STRUCTURE changed this session, rebuild it too: `python3 .neoize/collect.py` then
-  `neoize load-graph .neoize/graph.cypher`, and re-run `neoize load-lessons` after (a structural reload
-  drops the lesson-to-structure anchors). This is the `neoize-refresh` routine; defer to it for the
-  mechanics.
+Authoring a lesson writes a JSON file; it is not in the graph until it is loaded, and a lesson that is
+only on disk is not retrievable. End the session by applying the whole of what you wrote, in one pass:
+
+- Run `apply` (`neoize apply`). It regenerates and loads the structural layer, runs the project's
+  symbol-layer refresh if it has one, loads this project's lessons (pruned, so retired or moved lessons
+  also leave the graph), then loads the shared layer. It is the one action that takes everything you saved
+  this session, structure and symbols and project and shared lessons, into the live graph together, in the
+  right order so the anchors resolve.
+- Read the resolved-anchor denominator `apply` prints from the lesson load: an anchor that did not resolve
+  is reported by name, so fix the id, never leave a lesson anchored to nothing. If `apply` stops on a step,
+  fix that step rather than loading the rest by hand.
+- If you only authored lessons and touched no code or symbols, `apply` still does the right thing (it skips
+  the structure and symbol steps), so it is always the safe end-of-work action. For the individual pieces
+  (just reload lessons, just rebuild structure) defer to the `neoize-refresh` routine.
 
 ## Step 6 - keep one home per fact
 
