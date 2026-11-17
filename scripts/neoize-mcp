@@ -24,6 +24,7 @@ CONTROL (mutating): these drive the local graph and the project's .neoize/ files
   - rebuild_structure : regenerate the structural graph from the code (runs .neoize/collect.py).
   - check_lessons     : validate the lessons files offline (no graph).
   - check_graph       : run the project's structural check offline (.neoize/check.py).
+  - sync_queries      : re-sync .neoize/queries from the plugin templates (queries only).
   - promote_lessons   : move project lessons up into the universal (shared) layer.
   - load_shared       : load the universal lessons store into product=shared.
 
@@ -58,7 +59,7 @@ USER = os.environ.get("NEOIZE_NEO4J_USER") or "neo4j"
 PASSWORD = os.environ.get("NEOIZE_NEO4J_PASSWORD") or "neoize-local"
 
 SERVER_NAME = "neoize-neo4j"
-SERVER_VERSION = "0.4.2"
+SERVER_VERSION = "0.4.3"
 
 # The reserved product id for the universal layer, read by every session on top of its own product.
 SHARED = "shared"
@@ -265,6 +266,14 @@ def tool_check_graph(args):
     return _cli("check-graph", timeout=120)
 
 
+def tool_sync_queries(args):
+    """Re-sync .neoize/queries from the plugin's shipped query templates (QUERIES ONLY; never lessons, the
+    collector or anything else). Default is a dry run; set write to apply, diff to show each change."""
+    args = args or {}
+    sub = ["sync-queries"] + (["--write"] if args.get("write") else []) + (["--diff"] if args.get("diff") else [])
+    return _cli(*sub, timeout=60)
+
+
 def tool_promote(args):
     """Move project lessons UP into the universal (shared) layer, so knowledge that holds for all work
     with Claude is read by every session. A file operation: the chosen lessons leave this project's lessons
@@ -382,6 +391,22 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}}
     },
     {
+        "name": "sync_queries",
+        "description": "Re-sync .neoize/queries/*.cypher from the plugin's shipped query templates, QUERIES "
+                       "ONLY (never lessons, the collector, triggers or anything else). A project's saved "
+                       "queries were copied at init, so a plugin that improves them (e.g. the shared+project "
+                       "union scoping) leaves the copies behind; this brings them forward. Default is a dry "
+                       "run that classifies each as new/changed/up-to-date; set diff to see each change and "
+                       "write to apply. Read the diff before writing: a query you customised shows as changed.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "write": {"type": "boolean", "description": "Apply the sync (default is a dry run)."},
+                "diff": {"type": "boolean", "description": "Show the unified diff of each changed file."}
+            }
+        }
+    },
+    {
         "name": "promote_lessons",
         "description": "MUTATING (writes files). Move project lessons UP into the universal (shared) layer, "
                        "so knowledge that holds for ALL work with Claude is read by every session. The "
@@ -424,6 +449,7 @@ DISPATCH = {
     "rebuild_structure": tool_rebuild_structure,
     "check_lessons": tool_check_lessons,
     "check_graph": tool_check_graph,
+    "sync_queries": tool_sync_queries,
     "promote_lessons": tool_promote,
     "load_shared": tool_load_shared,
 }

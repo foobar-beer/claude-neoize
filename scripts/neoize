@@ -33,6 +33,7 @@ into the shared layer.
   neoize load-graph <file>  # load this product's collector .cypher, resetting only its structural layer
   neoize shared load        # load the universal lessons store (~/.neoize/shared/lessons) into `shared`
   neoize check [path]       # validate lessons files locally: schema, duplicate ids, dangling supersedes
+  neoize sync-queries       # re-sync .neoize/queries from the plugin templates (queries only; dry by default)
   neoize check-graph        # run the project's structural check (.neoize/check.py), if it has one
   neoize query "<cypher>"   # run one Cypher query ($product and $products are bound for scoping)
   neoize product [--set ID] # print (or set) the product and mode this project resolves to
@@ -47,6 +48,7 @@ used by `up`/`down` is ~/.neoize/docker-compose.neo4j.yml (materialised from the
 `up`); a legacy .neoize/docker-compose.neo4j.yml in the project is still honoured if present.
 """
 import argparse
+import difflib
 import glob
 import json
 import os
@@ -604,6 +606,56 @@ def cmd_shared(args):
 
 
 # ----------------------------------------------------------------------------- main
+def cmd_sync_queries(args):
+    """Re-sync .neoize/queries/*.cypher from the plugin's shipped query templates. QUERIES ONLY: it never
+    touches lessons, the collector, triggers, project.json, wrap.md or any other authored .neoize content.
+    The saved queries were copied from the templates at init, so a plugin that improves them (for example
+    the shared+project union scoping) leaves a project's copies behind; this brings them forward.
+
+    The default is a DRY RUN: it classifies each template as new, changed or up-to-date and writes nothing.
+    --diff prints the unified diff of each changed file (yours vs the template) so a customised query is
+    obvious before you overwrite it. --write applies, copying only the query files."""
+    src = os.path.join(_PLUGIN_ROOT, "templates", "queries")
+    dst = os.path.join(_neoize_dir(), "queries")
+    if not os.path.isdir(src):
+        print(f"no shipped query templates at {src}.", file=sys.stderr)
+        return 1
+    new, changed, same = [], [], []
+    for sf in sorted(glob.glob(os.path.join(src, "*.cypher"))):
+        name = os.path.basename(sf)
+        s = open(sf, encoding="utf-8").read()
+        df = os.path.join(dst, name)
+        if not os.path.isfile(df):
+            new.append(name)
+        elif open(df, encoding="utf-8").read() == s:
+            same.append(name)
+        else:
+            changed.append(name)
+    print(f"Query templates vs {dst}: {len(new)} new, {len(changed)} changed, {len(same)} up to date.")
+    for name in new:
+        print(f"  new      {name}")
+    for name in changed:
+        print(f"  changed  {name}  (your copy differs from the template)")
+    if args.diff:
+        for name in changed:
+            yours = open(os.path.join(dst, name), encoding="utf-8").read().splitlines(keepends=True)
+            tmpl = open(os.path.join(src, name), encoding="utf-8").read().splitlines(keepends=True)
+            print(f"\n=== {name}: yours (-) vs template (+) ===")
+            sys.stdout.writelines(difflib.unified_diff(yours, tmpl, fromfile=f"yours/{name}",
+                                                        tofile=f"template/{name}"))
+    if not args.write:
+        if new or changed:
+            print("\nDry run, nothing written. Re-run with --write to apply (queries only; lessons, collector "
+                  "and the rest of .neoize are never touched). Add --diff to review changes first.")
+        return 0
+    os.makedirs(dst, exist_ok=True)
+    for name in new + changed:
+        shutil.copyfile(os.path.join(src, name), os.path.join(dst, name))
+    print(f"Wrote {len(new) + len(changed)} query file(s) to {dst}. "
+          f"Lessons, collector and the rest of .neoize untouched.")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="Bring up, load and query the local knowledge graph.")
     sub = ap.add_subparsers(dest="cmd")
@@ -626,6 +678,11 @@ def main():
     ck = sub.add_parser("check", help="validate lessons files locally (no graph)")
     ck.add_argument("path", nargs="?", help="file/dir/glob (default .neoize/lessons)")
     ck.set_defaults(func=cmd_check)
+
+    sq = sub.add_parser("sync-queries", help="re-sync .neoize/queries from the plugin templates (queries only)")
+    sq.add_argument("--write", action="store_true", help="apply (default is a dry run)")
+    sq.add_argument("--diff", action="store_true", help="show the unified diff of each changed file")
+    sq.set_defaults(func=cmd_sync_queries)
 
     cg = sub.add_parser("check-graph", help="run the project's structural check (.neoize/check.py)")
     cg.add_argument("rest", nargs=argparse.REMAINDER, help="args passed through to check.py")
