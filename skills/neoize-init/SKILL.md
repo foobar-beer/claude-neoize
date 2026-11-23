@@ -113,8 +113,10 @@ Create, if absent:
 - `.neoize/triggers.json` - copy from `${CLAUDE_PLUGIN_ROOT}/templates/triggers.template.json`, then
   trim it to the operations this project actually has.
 - `.neoize/wrap.md` - copy from `${CLAUDE_PLUGIN_ROOT}/templates/wrap.template.md`, then set its paths to
-  this project's real stores (the always-on rules file, the changelog, the agent-memory location). This
-  is what `/neoize:wrap` reads to route end-of-session facts to their one home.
+  this project's real stores (the changelog and the agent-memory location). This is what `/neoize:wrap`
+  reads to route end-of-session facts to their one home. The always-on rules file is not a hand-authored
+  store: a `scope: always` lesson is materialised into it by `neoize apply`, at the `rules_file` path in
+  `project.json` (default `CLAUDE.md`). Run `neoize always-on --write` once to add the managed block.
 - `.neoize/queries/` - copy the saved retrieval queries from `${CLAUDE_PLUGIN_ROOT}/templates/queries/`.
 
 Do not overwrite a file that already exists. Report what you created and what you left alone.
@@ -208,6 +210,11 @@ topic, by operation, by structural node). Say that the session reads the shared+
 `$products`, so a read scopes with `WHERE n.product IN $products` (and an unscoped Lesson/Topic/Operation
 read is refused). Show the user the exact text before writing it. This is what makes the graph the first
 source instead of a database nobody queries.
+
+If the project will carry always-on discipline in the graph, offer to seed the managed always-on block in
+the same `CLAUDE.md` with `neoize always-on --write` (it adds the block between its markers and leaves the
+rest of the file alone). From then on `neoize apply` keeps the block current from the `scope: always`
+lessons.
 
 ## Finish
 

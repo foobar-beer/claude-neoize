@@ -32,8 +32,9 @@ into the shared layer.
   neoize load-lessons ...   # load authored lessons for this product (delegates to scripts/load-lessons)
   neoize load-graph <file>  # load this product's collector .cypher, resetting only its structural layer
   neoize shared load        # load the universal lessons store (~/.neoize/shared/lessons) into `shared`
-  neoize apply              # end of work: regenerate + load structure, symbols, lessons and shared in one pass
-  neoize check [path]       # validate lessons files locally: schema, duplicate ids, dangling supersedes
+  neoize apply              # end of work: regenerate + load structure, symbols, lessons, shared, always-on block
+  neoize always-on [--write] # print (or write into the rules file) the scope:always lessons block
+  neoize check [path]       # validate lessons files against the schema: enums, required, dup ids, supersedes
   neoize sync-queries       # re-sync .neoize/queries from the plugin templates (queries only; dry by default)
   neoize check-graph        # run the project's structural check (.neoize/check.py), if it has one
   neoize query "<cypher>"   # run one Cypher query ($product and $products are bound for scoping)
@@ -57,6 +58,8 @@ import re
 import shutil
 import subprocess
 import sys
+
+import lessonschema
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PLUGIN_ROOT = os.path.dirname(_HERE)          # scripts/ -> plugin root
@@ -362,29 +365,35 @@ def _iter_lesson_files(path):
 
 
 def cmd_check(args):
-    """Validate lessons files WITHOUT touching the graph: required fields, duplicate ids, and
-    supersedes targets that no loaded file defines. Prints the denominator it examined."""
+    """Validate lessons files against templates/lesson.schema.json WITHOUT touching the graph: required
+    fields, the closed enums (kind, scope, confidence, status), unknown fields, duplicate ids, and
+    supersedes targets that no loaded file defines. This is the same taxonomy the loader enforces, so a
+    file that passes here loads without an enum refusal. Prints the denominator it examined and names the
+    lesson and file behind every finding."""
     path = args.path or os.path.join(_neoize_dir(), "lessons")
     files = _iter_lesson_files(path)
     if not files:
         print(f"INCONCLUSIVE: no lessons files found under {path}", file=sys.stderr)
         return 2
-    required = {"id", "title", "body", "kind", "scope", "confidence", "status", "anchors"}
     lessons, findings = [], []
     for f in files:
+        base = os.path.basename(f)
         try:
             doc = json.load(open(f, encoding="utf-8"))
         except Exception as exc:
-            findings.append(("unreadable", f, str(exc)))
+            findings.append(("unreadable", base, str(exc)))
             continue
         for l in doc.get("lessons", []):
             lessons.append(l)
-            missing = required - set(l)
-            if missing:
-                findings.append(("missing-fields", l.get("id", "<no id>"), ", ".join(sorted(missing))))
+            where = f'{l.get("id", "<no id>")} ({base})'
+            # Retired lessons are tombstones deleted by id; the loader never stores their other fields,
+            # so only check the full schema on what actually loads.
+            if l.get("status") != "retired":
+                for problem in lessonschema.validate(l):
+                    findings.append(("schema", where, problem))
             for a in l.get("anchors", []):
                 if "type" not in a or "id" not in a:
-                    findings.append(("bad-anchor", l.get("id", "<no id>"), json.dumps(a)))
+                    findings.append(("bad-anchor", where, json.dumps(a)))
     ids = [l.get("id") for l in lessons if l.get("id")]
     seen = set()
     for i in ids:
@@ -606,13 +615,124 @@ def cmd_shared(args):
                           check=False, env=env).returncode
 
 
+# ----------------------------------------------------------------------------- always-on rules block
+# A scope:always lesson must be in view every session, not fetched on demand, so it is materialised into
+# the project's always-on rules file (the CLAUDE.md-style file every session already loads) as a managed
+# block between these markers. The graph is the source of truth; this block is generated from it, so an
+# always-on rule is authored ONCE as a lesson and never hand-copied into the rules file.
+ALWAYS_START = "<!-- neoize:always-on:START - generated from scope:always lessons by `neoize apply`; edit the lesson, not this block -->"
+ALWAYS_END = "<!-- neoize:always-on:END -->"
+
+
+def _rules_file():
+    """The always-on rules file this project materialises scope:always lessons into. project.json
+    'rules_file' (relative to the project, or absolute) wins; the default is CLAUDE.md at the project root,
+    the file a session already loads every time."""
+    rf = _project_json().get("rules_file") or "CLAUDE.md"
+    return rf if os.path.isabs(rf) else os.path.join(_project_dir(), rf)
+
+
+def _lessons_in(d):
+    """Every lesson object authored under a directory of *.json, without the graph. Empty when the dir is
+    absent, so a project with no shared layer or no lessons simply contributes nothing. A file that does
+    not parse is skipped here; `neoize check` is where a malformed file is reported."""
+    out = []
+    if d and os.path.isdir(d):
+        for f in sorted(glob.glob(os.path.join(d, "*.json"))):
+            try:
+                out += json.load(open(f, encoding="utf-8")).get("lessons", [])
+            except Exception:
+                pass
+    return out
+
+
+def _always_on_lessons():
+    """The scope:always lessons for this session's read union, read from the AUTHORED files (the same
+    source the loader reads), ordered stably so the generated block is deterministic. Shared layer first,
+    then this project; retired tombstones excluded. Global mode reads shared+project; project mode and the
+    shared product itself read only their own lessons."""
+    layers = []
+    if _mode() != "project" and _product() != SHARED:
+        layers.append(("0-shared", _lessons_in(_shared_lessons_dir())))
+    layers.append(("1-project", _lessons_in(os.path.join(_neoize_dir(), "lessons"))))
+    picked = []
+    for rank, lessons in layers:
+        for l in lessons:
+            if l.get("scope") == "always" and l.get("status") != "retired":
+                picked.append((rank, l.get("id", ""), l))
+    picked.sort(key=lambda t: (t[0], t[1]))
+    return [l for _, _, l in picked]
+
+
+def _render_always_block(lessons):
+    """The managed block: the two markers around a heading and one bullet per always-on lesson. It is a
+    pure function of the lessons, so `neoize apply` regenerates it byte-for-byte when nothing changed and
+    leaves no spurious diff."""
+    lines = [ALWAYS_START,
+             "## Always-on lessons (neoize)",
+             "",
+             "Loaded every session from the knowledge graph, because they must not wait for an anchor "
+             "match. Do not edit here. Edit the `scope: always` lesson and run `neoize apply`.",
+             ""]
+    if lessons:
+        for l in lessons:
+            lines.append(f"- **{l.get('title', '').strip()}** {l.get('body', '').strip()}")
+    else:
+        lines.append("- (none yet: author a lesson with `scope: always` to populate this)")
+    lines.append(ALWAYS_END)
+    return "\n".join(lines)
+
+
+def _splice_always_block(text, block):
+    """Replace an existing START..END block in `text`, or return None when the markers are not both there.
+    Only the span between (and including) the markers changes, so the rest of the file stays byte-for-byte."""
+    i = text.find(ALWAYS_START)
+    j = text.find(ALWAYS_END)
+    if i == -1 or j == -1 or j < i:
+        return None
+    return text[:i] + block + text[j + len(ALWAYS_END):]
+
+
+def cmd_always_on(args):
+    """Print, or with --write materialise, the always-on rules block for this project. The block is
+    generated from the scope:always lessons in this session's read union, read from the authored files, so
+    the graph need not be up. --write updates the block in place between its markers, or appends a fresh
+    block (with the markers) when the rules file has none yet. Nothing outside the markers is touched, and
+    the rules file is never created for you."""
+    lessons = _always_on_lessons()
+    block = _render_always_block(lessons)
+    if not getattr(args, "write", False):
+        print(block)
+        return 0
+    path = _rules_file()
+    if not os.path.isfile(path):
+        print(f"rules file {path} does not exist. Create it (or point project.json \"rules_file\" at an "
+              f"existing file) before materialising the always-on block; neoize will not create it.",
+              file=sys.stderr)
+        return 1
+    text = open(path, encoding="utf-8").read()
+    spliced = _splice_always_block(text, block)
+    if spliced is None:
+        sep = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+        spliced = text + sep + block + "\n"
+        action = f"appended a new always-on block to {path}"
+    elif spliced == text:
+        print(f"{path}: always-on block already current ({len(lessons)} lesson(s)). Nothing to write.")
+        return 0
+    else:
+        action = f"updated the always-on block in {path}"
+    open(path, "w", encoding="utf-8").write(spliced)
+    print(f"{action} ({len(lessons)} always-on lesson(s)).")
+    return 0
+
+
 # ----------------------------------------------------------------------------- apply (full graph refresh)
 def cmd_apply(args):
     """Apply EVERYTHING authored to the live graph in one pass: the end-of-work companion to wrap. It
     regenerates and loads the structural layer, runs the project's symbol-layer refresh if it declares one,
-    loads this project's lessons, then loads the shared layer, all scoped to this product. It is the single
-    command that takes 'I saved the JSON' to 'the graph is current', so a lesson or a new symbol is actually
-    retrievable, not just on disk.
+    loads this project's lessons, loads the shared layer, then regenerates the always-on rules block, all
+    scoped to this product. It is the single command that takes 'I saved the JSON' to 'the graph is current',
+    so a lesson or a new symbol is actually retrievable, not just on disk.
 
     Each step is skipped cleanly when it does not apply, and the run stops on the first failure:
       1. structure - run .neoize/collect.py (if present), then load-graph the .cypher it writes (resets
@@ -624,7 +744,10 @@ def cmd_apply(args):
                      also leave the graph), which re-resolves the anchors a structural reload dropped.
       4. shared    - load the universal store (global mode only), pruned like the project layer, so a
                      lesson routed to shared this session lands and a retired one leaves. Both layers prune
-                     against their own store, so --no-prune makes both purely additive."""
+                     against their own store, so --no-prune makes both purely additive.
+      5. always-on - regenerate the scope:always block in the rules file (project.json "rules_file",
+                     default CLAUDE.md), but only when it already carries the markers. A project adopts the
+                     block once with `neoize always-on --write`; apply keeps it current from then on."""
     from argparse import Namespace
     # The step headers print from this process while the sub-steps write to stdout directly, so keep the
     # two in order by flushing this process's prints on every newline.
@@ -643,24 +766,24 @@ def cmd_apply(args):
     collect = os.path.join(_neoize_dir(), "collect.py")
     gcypher = os.path.join(_neoize_dir(), "graph.cypher")
     if os.path.isfile(collect):
-        print("== 1/4 structure: regenerate (collect.py) ==")
+        print("== 1/5 structure: regenerate (collect.py) ==")
         rc = subprocess.run([sys.executable, collect], cwd=_project_dir(), check=False).returncode
         if rc != 0:
             print("collect.py failed; stopping before anything is loaded.", file=sys.stderr)
             return rc
         if os.path.isfile(gcypher):
-            print("== 1/4 structure: load-graph ==")
+            print("== 1/5 structure: load-graph ==")
             rc = cmd_load_graph(Namespace(file=gcypher))
             if rc != 0:
                 return rc
         else:
             print(f"(collect.py ran but wrote no {gcypher}; skipping load-graph)")
     else:
-        print("== 1/4 structure: no .neoize/collect.py, skipping ==")
+        print("== 1/5 structure: no .neoize/collect.py, skipping ==")
 
     sr = _project_json().get("symbols_refresh")
     if sr:
-        print(f"\n== 2/4 symbols: project symbols_refresh ==\n$ {sr}")
+        print(f"\n== 2/5 symbols: project symbols_refresh ==\n$ {sr}")
         env = dict(os.environ, NEOIZE_PRODUCT=product, NEOIZE_NEO4J_CONTAINER=container)
         rc = subprocess.run(sr, shell=True, cwd=_project_dir(), env=env, check=False).returncode
         if rc != 0:
@@ -668,9 +791,9 @@ def cmd_apply(args):
                   file=sys.stderr)
             return rc
     else:
-        print("\n== 2/4 symbols: no 'symbols_refresh' in project.json, skipping ==")
+        print("\n== 2/5 symbols: no 'symbols_refresh' in project.json, skipping ==")
 
-    print(f"\n== 3/4 lessons: load-lessons{' --prune' if prune else ''} ==")
+    print(f"\n== 3/5 lessons: load-lessons{' --prune' if prune else ''} ==")
     rc = cmd_load_lessons(Namespace(paths=None, prune=prune))
     if rc != 0:
         return rc
@@ -678,14 +801,31 @@ def cmd_apply(args):
     if _mode() != "project":
         sdir = _shared_lessons_dir()
         if os.path.isdir(sdir) and glob.glob(os.path.join(sdir, "*.json")):
-            print(f"\n== 4/4 shared: load the universal layer{' --prune' if prune else ''} ==")
+            print(f"\n== 4/5 shared: load the universal layer{' --prune' if prune else ''} ==")
             rc = cmd_shared(Namespace(shared_cmd="load", prune=prune))
             if rc != 0:
                 return rc
         else:
-            print("\n== 4/4 shared: the universal store is empty, skipping ==")
+            print("\n== 4/5 shared: the universal store is empty, skipping ==")
     else:
-        print("\n== 4/4 shared: project mode has no shared layer, skipping ==")
+        print("\n== 4/5 shared: project mode has no shared layer, skipping ==")
+
+    # 5. always-on: regenerate the managed block in the rules file, but ONLY when the project has already
+    #    opted in by having the markers. apply never injects a block into a rules file unasked; a project
+    #    adopts it once with `neoize always-on --write`, and after that every apply keeps it current.
+    rf = _rules_file()
+    always = _always_on_lessons()
+    if os.path.isfile(rf) and ALWAYS_START in open(rf, encoding="utf-8").read():
+        print(f"\n== 5/5 always-on: regenerate the block in {os.path.basename(rf)} ==")
+        rc = cmd_always_on(Namespace(write=True))
+        if rc != 0:
+            return rc
+    elif always:
+        print(f"\n== 5/5 always-on: {len(always)} scope:always lesson(s) not materialised ==")
+        print(f"   {os.path.basename(rf)} has no neoize:always-on block yet; run "
+              f"`neoize always-on --write` to add one.")
+    else:
+        print("\n== 5/5 always-on: no scope:always lessons, skipping ==")
 
     print(f"\nDone. The graph is current for product '{product}'.")
     return 0
@@ -797,10 +937,16 @@ def main():
     sd.set_defaults(func=cmd_shared)
 
     ap_apply = sub.add_parser("apply",
-                              help="apply everything (structure, symbols, lessons, shared) to the graph")
+                              help="apply everything (structure, symbols, lessons, shared, always-on) to the graph")
     ap_apply.add_argument("--no-prune", action="store_true",
                           help="keep graph lessons absent from the files (default prunes the project layer)")
     ap_apply.set_defaults(func=cmd_apply)
+
+    ao = sub.add_parser("always-on",
+                        help="print, or --write, the always-on rules block (the scope:always lessons)")
+    ao.add_argument("--write", action="store_true",
+                    help="materialise the block into the rules file (project.json 'rules_file', default CLAUDE.md)")
+    ao.set_defaults(func=cmd_always_on)
 
     args = ap.parse_args()
     if not getattr(args, "func", None):
