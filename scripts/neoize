@@ -793,10 +793,14 @@ def cmd_apply(args):
     else:
         print("\n== 2/5 symbols: no 'symbols_refresh' in project.json, skipping ==")
 
-    print(f"\n== 3/5 lessons: load-lessons{' --prune' if prune else ''} ==")
-    rc = cmd_load_lessons(Namespace(paths=None, prune=prune))
-    if rc != 0:
-        return rc
+    ldir = os.path.join(_neoize_dir(), "lessons")
+    if os.path.isdir(ldir) and glob.glob(os.path.join(ldir, "*.json")):
+        print(f"\n== 3/5 lessons: load-lessons{' --prune' if prune else ''} ==")
+        rc = cmd_load_lessons(Namespace(paths=None, prune=prune))
+        if rc != 0:
+            return rc
+    else:
+        print("\n== 3/5 lessons: no .neoize/lessons/*.json, skipping ==")
 
     if _mode() != "project":
         sdir = _shared_lessons_dir()
