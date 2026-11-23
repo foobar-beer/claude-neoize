@@ -186,11 +186,14 @@ mechanism in the present tense goes false while nothing errors, so reconciling o
 loop, not an afterthought.
 
 Run `/neoize:wrap` at the end of a session. It decides what the session learned and routes each fact to
-its one home: a situational gotcha becomes a lesson in the graph, a durable rule goes to the always-on
-rules file, history goes to the changelog, session state goes to agent memory. The homes other than the
-graph are named in `.neoize/wrap.md`, which `init` scaffolds for you. The rule it enforces is that each
-fact lives in exactly one place, because a fact written twice drifts and the stale copy gets cited with
-confidence.
+its one home: everything the graph holds is a lesson, placed by its space (shared or project, its reach)
+and its `scope` (`situational`, retrieved on demand through its anchor, or `always`, in view every
+session). An always-applies rule is a `scope: always` lesson that `neoize apply` materialises into a
+managed block in the always-on rules file, so it is authored once in the graph rather than hand-written
+into `CLAUDE.md`. History goes to the changelog, session state goes to agent memory. The homes other than
+the graph are named in `.neoize/wrap.md`, which `init` scaffolds for you. The rule it enforces is that
+each fact lives in exactly one place, because a fact written twice drifts and the stale copy gets cited
+with confidence.
 
 ## Upgrading an existing graph
 

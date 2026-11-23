@@ -46,6 +46,8 @@ import os
 import subprocess
 import sys
 
+import lessonschema
+
 def _project_json():
     proj = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
     try:
@@ -160,12 +162,31 @@ def main():
 
     files = resolve_files(args)
     lessons = []
+    origin = {}   # id(lesson) -> the file it was read from, so a finding can name the file
     for f in files:
-        lessons += json.load(open(f, encoding="utf-8"))["lessons"]
+        for l in json.load(open(f, encoding="utf-8"))["lessons"]:
+            lessons.append(l)
+            origin[id(l)] = f
 
     batch_ids = {l["id"] for l in lessons}
     retired = [l for l in lessons if l.get("status") == "retired"]
     live = [l for l in lessons if l.get("status") != "retired"]
+
+    # Validate every live lesson against the shipped schema BEFORE any Cypher runs: an out-of-enum kind
+    # or scope, a missing required field or an unknown field would otherwise load verbatim and mis-bucket
+    # every group-by. A retired lesson is a tombstone deleted by id, so its other fields never reach the
+    # graph and are not validated. Refuse the whole batch on any finding, naming the lesson and its file.
+    schema_findings = []
+    for l in live:
+        for problem in lessonschema.validate(l):
+            schema_findings.append((l.get("id", "<no id>"), origin.get(id(l), "<unknown file>"), problem))
+    if schema_findings:
+        print(f"! {len(schema_findings)} lesson(s) violate templates/lesson.schema.json; nothing loaded:",
+              file=sys.stderr)
+        for lid, src, problem in schema_findings:
+            print(f"      {lid}  ({os.path.basename(src)}): {problem}", file=sys.stderr)
+        print("  Fix the lesson(s) and load again. The taxonomy is closed on purpose.", file=sys.stderr)
+        return 1
 
     # Validate anchors: fetch existing ids per derived label in ONE query each, check in memory.
     labels = {a["type"] for l in live for a in l["anchors"] if a["type"] not in AUTHORED_ANCHORS}

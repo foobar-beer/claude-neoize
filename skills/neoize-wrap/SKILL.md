@@ -1,6 +1,6 @@
 ---
 name: neoize-wrap
-description: End-of-session capture. Decide what this session learned, route each fact to its one home (a lesson in the graph, the always-on rules file, the changelog, or agent memory), author and load the new lessons, and reconcile any that went stale. Use at the end of a working session, or when asked to "wrap", "write up what we learned", or "capture this before I close".
+description: End-of-session capture. Decide what this session learned, route each fact to its one home (a lesson in the graph, where an always-on rule is a scope:always lesson materialised into the rules file, the changelog, or agent memory), author and load the new lessons, and reconcile any that went stale. Use at the end of a working session, or when asked to "wrap", "write up what we learned", or "capture this before I close".
 when_to_use: The user is ending a session and wants the knowledge captured, or asks to wrap, record lessons, or save what was learned. Run it after the work is done and verified, not mid-task.
 ---
 
@@ -49,33 +49,38 @@ tools wrap, kept as an optional terminal fallback. The map:
 
 ## Step 1 - read the project's routing config
 
-The non-graph homes are project-specific, so read `.neoize/wrap.md` for where each kind of fact goes
-(the always-on rules file, the changelog, the agent-memory location). If it is absent, scaffold it from
+The non-graph homes are project-specific, so read `.neoize/wrap.md` for where the changelog and the
+agent-memory location live. If it is absent, scaffold it from
 `${CLAUDE_PLUGIN_ROOT}/templates/wrap.template.md`, ask the user to confirm the targets, and proceed.
-Never guess a store's path into a write.
+The always-on rules file is no longer a hand-authored home: it is where `neoize apply` writes the
+generated `scope: always` block, at the path in project.json `rules_file` (default `CLAUDE.md`). Never
+guess a store's path into a write.
 
 ## Step 2 - enumerate what was learned, then route each fact
 
-List the candidate facts from this session before writing any of them. Route each to its ONE home:
+List the candidate facts from this session before writing any of them. Everything the graph holds is a
+Lesson, placed by two independent choices: its SPACE (shared or project, which is its reach across
+products) and its `scope` (always or situational, which is how it is retrieved). Route each fact to its
+ONE home:
 
-- **A durable rule or convention** (always applies, not tied to one piece of code) -> the always-on
-  rules file named in `wrap.md`. This is NOT a lesson. It must be loaded every session, so it belongs in
-  the instructions, not behind an on-demand query.
-- **A situational gotcha or technical note anchored to specific code** (a symbol, a subsystem, a file, a
-  domain entity) -> a **project Lesson** in `.neoize/lessons/`, anchored to that node (or a Topic). This is
-  the graph's job: it surfaces only when you touch what it concerns. Always project (it names your code).
-- **A universal practice** (holds for every codebase: git discipline, PR flow, verification, writing voice,
-  agent orchestration) -> a **shared Lesson** in `~/.neoize/shared/lessons`, anchored to a Topic or an
-  Operation. This is the baseline every session reads. Hold a high bar; when in doubt, file it as project.
+- **An always-applies discipline** (a rule or convention that must be in view every session, not tied to
+  one piece of code: git flow, PR discipline, verification, writing voice, orchestration) -> a **Lesson
+  with `scope: always`**. Author it once as a lesson; `neoize apply` materialises it into the rules file
+  block, so you do not hand-write it into `CLAUDE.md`. Put it in the **shared** space when it holds for
+  every codebase, the **project** space when it is about this product.
+- **A situational note anchored to specific code** (a symbol, a subsystem, a file, a domain entity) -> a
+  **Lesson with `scope: situational`**, anchored to that node (or a Topic). It surfaces only when you touch
+  what it concerns. Shared when the practice is universal, project when it names your code.
 - **A trap at a decision point** (bites when you push, release, migrate, close a ticket) -> a **Lesson
   anchored to an Operation**, plus a row in `.neoize/triggers.json` so the hook surfaces it when that
-  operation fires. Decide its space the same way: a universal push rule is shared, a rule about THIS
-  product's release is project.
+  operation fires. Use `scope: always` when it must always be in view, `scope: situational` when the
+  trigger is enough. Shared for a universal push rule, project for THIS product's release.
 - **History** (what shipped, when, in which PR) -> the changelog named in `wrap.md`. Not the graph.
 - **Session state** (what to pick up next, what is still unverified, open threads) -> agent memory.
 
-Report the routing (fact -> home; for a lesson, its space: shared or project) before writing. A fact you
-cannot place is one to raise with the user, not to file twice.
+Report the routing (fact -> home; for a lesson, its space and its scope) before writing. A fact you
+cannot place is one to raise with the user, not to file twice. Hold a high bar for the shared space and
+for `scope: always`; when in doubt, file it project and situational.
 
 ## Step 3 - author the new lessons
 
@@ -110,10 +115,14 @@ Authoring a lesson writes a JSON file; it is not in the graph until it is loaded
 only on disk is not retrievable. End the session by applying the whole of what you wrote, in one pass:
 
 - Run `apply` (`neoize apply`). It regenerates and loads the structural layer, runs the project's
-  symbol-layer refresh if it has one, loads this project's lessons, then loads the shared layer. Both lesson
-  layers are pruned against their store, so a retired or moved lesson leaves the graph too, not only the new
-  ones land. It is the one action that takes everything you saved this session, structure and symbols and
-  project and shared lessons, into the live graph together, in the right order so the anchors resolve.
+  symbol-layer refresh if it has one, loads this project's lessons, loads the shared layer, then
+  regenerates the `scope: always` block in the rules file. Both lesson layers are pruned against their
+  store, so a retired or moved lesson leaves the graph too, not only the new ones land. It is the one
+  action that takes everything you saved this session, structure and symbols and project and shared
+  lessons, into the live graph together, in the right order so the anchors resolve.
+- If a session authored its first `scope: always` lesson and the rules file has no block yet, `apply`
+  points that out rather than editing the file unasked. Run `neoize always-on --write` once to add the
+  block, and every later `apply` keeps it current.
 - Read the resolved-anchor denominator `apply` prints from the lesson load: an anchor that did not resolve
   is reported by name, so fix the id, never leave a lesson anchored to nothing. If `apply` stops on a step,
   fix that step rather than loading the rest by hand.
@@ -123,9 +132,10 @@ only on disk is not retrievable. End the session by applying the whole of what y
 
 ## Step 6 - keep one home per fact
 
-When you wrote a durable rule into the rules file and you had also drafted it elsewhere (a scratch note,
-a second file), delete the draft and leave a pointer. Two correct copies is how the project acquires its
-next stale note. Grep for an older copy of anything you just wrote and collapse it to one.
+When you authored a `scope: always` lesson and the same rule was also sitting hand-written in the rules
+file or in a scratch note, delete the hand-written copy. The generated block is now the one home for an
+always-on rule, so a hand-written duplicate is just the project's next stale note waiting to happen. Grep
+for an older copy of anything you just wrote and collapse it to one.
 
 ## Finish
 

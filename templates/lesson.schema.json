@@ -33,13 +33,13 @@
         },
         "kind": {
           "type": "string",
-          "enum": ["rule", "gotcha", "reference", "convention"],
-          "description": "rule = a standing instruction; gotcha = a trap and its fix; reference = a fact catalogue; convention = a project norm."
+          "enum": ["rule", "gotcha", "reference", "convention", "process"],
+          "description": "rule = a standing instruction; gotcha = a trap and its fix; reference = a fact catalogue; convention = a project norm; process = a procedural discipline for an operation (a workflow or orchestration step), distinct from a standing rule. Closed set, enforced by the loader and by `neoize check`."
         },
         "scope": {
           "type": "string",
-          "enum": ["universal", "situational"],
-          "description": "universal = always applies; situational = applies when editing the anchored code or running the anchored operation."
+          "enum": ["situational", "always"],
+          "description": "HOW the lesson is retrieved, not which products it applies to. Reach across products is the product layer (the shared layer vs this project), so there is no 'universal' scope. situational = retrieved on demand through its anchor (the Topic, Operation or code it concerns). always = always in view, materialised into the always-on rules file on every `neoize apply`, for discipline that must never wait for an anchor match."
         },
         "confidence": {
           "type": "string",
