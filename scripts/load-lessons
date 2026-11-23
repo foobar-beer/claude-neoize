@@ -161,6 +161,17 @@ def main():
         return 2
 
     files = resolve_files(args)
+    # A dir or glob that matches nothing (a project with no .neoize/lessons yet, an empty lessons dir)
+    # resolves to a path that does not exist; skip it with a note rather than crashing on open(). An
+    # explicit filename that is missing is reported the same way, so a typo is visible, not a traceback.
+    missing = [f for f in files if not os.path.isfile(f)]
+    files = [f for f in files if os.path.isfile(f)]
+    for m in missing:
+        print(f"  (no lessons file at {m}, skipping)", file=sys.stderr)
+    if not files:
+        print("No lessons files to load.")
+        return 0
+
     lessons = []
     origin = {}   # id(lesson) -> the file it was read from, so a finding can name the file
     for f in files:
